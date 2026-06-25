@@ -154,3 +154,28 @@ def test_malformed_message_is_counted_not_raised(tmp_path):
     rec.stop()
     meta = json.loads((sd / "meta.json").read_text())
     assert meta["errors"] == 1
+
+
+def test_receiver_taps_raw_eeg_and_unmapped_streams(tmp_path):
+    from muse_visualizer import OSCReceiver
+
+    rec = make_recorder(tmp_path)
+    receiver = OSCReceiver(host="127.0.0.1", port=0)  # ephemeral port, no thread
+    receiver.recorder = rec
+    try:
+        sd = rec.start("museA")
+        # Raw 4-channel EEG must be stored un-averaged.
+        receiver._on_eeg("/muse/eeg", 1.0, 2.0, 3.0, 4.0)
+        # Unmapped stream reaches the recorder via the default handler.
+        receiver._on_default("/muse/acc", 0.1, 0.2, 9.8)
+        rec.stop()
+    finally:
+        receiver.server.server_close()
+
+    eeg = _read_csv(sd / "eeg.csv")
+    assert eeg[0] == ["t", "TP9", "AF7", "AF8", "TP10"]
+    assert eeg[1][1:] == ["1.0", "2.0", "3.0", "4.0"]  # raw, not the mean (2.5)
+
+    acc = _read_csv(sd / "acc.csv")
+    assert acc[0] == ["t", "x", "y", "z"]
+    assert acc[1][1:] == ["0.1", "0.2", "9.8"]

@@ -23,6 +23,8 @@ from PyQt5 import QtCore, QtGui, QtWidgets
 from pythonosc import dispatcher, osc_server
 from scipy.signal import butter, sosfilt, sosfilt_zi
 
+from session_recorder import SessionRecorder
+
 SAMPLE_RATE = 256                       # Muse 2 EEG sample rate
 WINDOW_SEC = 5
 BUFFER_SIZE = SAMPLE_RATE * WINDOW_SEC  # samples shown per band
@@ -284,6 +286,7 @@ class OSCReceiver:
     def __init__(self, host: str = "0.0.0.0", port: int = 5000, buf_max: int = SAMPLE_RATE * 30):
         self.eeg_buffer: deque[float] = deque(maxlen=buf_max)
         self.gyro = np.zeros(3, dtype=np.float64)  # x, y, z
+        self.recorder = None  # set to a SessionRecorder to capture raw OSC
         self.lock = threading.Lock()
         self.eeg_count = 0
         # Mind Monitor's pre-computed absolute band powers (log10), 4 channels
@@ -302,7 +305,13 @@ class OSCReceiver:
         self.server = osc_server.ThreadingOSCUDPServer((host, port), disp)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
-    def _on_eeg(self, _addr, *args):
+    def _tap(self, addr, args):
+        rec = self.recorder
+        if rec is not None and rec.active:
+            rec.record(addr, args)
+
+    def _on_eeg(self, addr, *args):
+        self._tap(addr, args)
         # Muse 2 sends 4 channels: TP9, AF7, AF8, TP10. Average for a single trace.
         if not args:
             return
@@ -314,13 +323,15 @@ class OSCReceiver:
             self.eeg_buffer.append(sample)
             self.eeg_count += 1
 
-    def _on_gyro(self, _addr, *args):
+    def _on_gyro(self, addr, *args):
+        self._tap(addr, args)
         if len(args) < 3:
             return
         with self.lock:
             self.gyro[:] = [float(args[0]), float(args[1]), float(args[2])]
 
-    def _on_theta_abs(self, _addr, *args):
+    def _on_theta_abs(self, addr, *args):
+        self._tap(addr, args)
         if not args:
             return
         try:
@@ -334,7 +345,8 @@ class OSCReceiver:
             self.theta_abs = float(np.mean(vals))
             self.bands_ts = time.monotonic()
 
-    def _on_beta_abs(self, _addr, *args):
+    def _on_beta_abs(self, addr, *args):
+        self._tap(addr, args)
         if not args:
             return
         try:
@@ -348,8 +360,8 @@ class OSCReceiver:
             self.beta_abs = float(np.mean(vals))
             self.bands_ts = time.monotonic()
 
-    def _on_default(self, _addr, *_args):
-        pass
+    def _on_default(self, addr, *args):
+        self._tap(addr, args)
 
     def drain_eeg(self) -> np.ndarray:
         with self.lock:
