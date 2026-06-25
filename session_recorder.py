@@ -94,7 +94,10 @@ class SessionRecorder:
             row = [str(a) for a in args[:ncols]]
             row += [""] * (ncols - len(row))
             return fname, cols, row
-        # (elements + catch-all added in Task 4)
+        if addr.startswith("/muse/elements/"):
+            vals = [str(a) for a in args[:4]]
+            vals += [""] * (4 - len(vals))
+            return "elements.csv", ["addr", "v0", "v1", "v2", "v3"], [addr] + vals
         return "other.csv", ["addr", "values"], [addr, "|".join(str(a) for a in args)]
 
     def _writer_for(self, fname, cols):

@@ -85,3 +85,72 @@ def test_records_fixed_streams_to_their_own_csvs(tmp_path):
     assert meta["streams"]["gyro.csv"] == 1
     assert meta["addresses"] == ["/muse/eeg", "/muse/gyro"]
     assert meta["columns"]["eeg.csv"] == ["t", "TP9", "AF7", "AF8", "TP10"]
+
+
+def test_elements_go_to_long_format_csv(tmp_path):
+    rec = make_recorder(tmp_path)
+    sd = rec.start("museA")
+    rec.record("/muse/elements/alpha_absolute", [0.1, 0.2, 0.3, 0.4], t=0.0)
+    rec.record("/muse/elements/blink", [1], t=0.1)
+    rec.stop()
+
+    rows = _read_csv(sd / "elements.csv")
+    assert rows[0] == ["t", "addr", "v0", "v1", "v2", "v3"]
+    assert rows[1] == ["0.000000", "/muse/elements/alpha_absolute", "0.1", "0.2", "0.3", "0.4"]
+    assert rows[2] == ["0.100000", "/muse/elements/blink", "1", "", "", ""]
+
+
+def test_unmapped_address_goes_to_other_csv(tmp_path):
+    rec = make_recorder(tmp_path)
+    sd = rec.start("museA")
+    rec.record("/muse/batt", [88, 4100, 3600, 0], t=0.0)
+    rec.stop()
+
+    rows = _read_csv(sd / "other.csv")
+    assert rows[0] == ["t", "addr", "values"]
+    assert rows[1] == ["0.000000", "/muse/batt", "88|4100|3600|0"]
+
+
+def test_variable_arity_locks_columns_from_first_message(tmp_path):
+    rec = make_recorder(tmp_path)
+    sd = rec.start("museA")
+    rec.record("/muse/eeg", [1.0, 2.0, 3.0, 4.0, 9.0], t=0.0)  # 5-channel (AUX)
+    rec.record("/muse/eeg", [1.0, 2.0, 3.0, 4.0], t=0.1)       # 4-channel later
+    rec.stop()
+
+    rows = _read_csv(sd / "eeg.csv")
+    assert rows[0] == ["t", "TP9", "AF7", "AF8", "TP10", "v4"]
+    assert rows[1] == ["0.000000", "1.0", "2.0", "3.0", "4.0", "9.0"]
+    assert rows[2] == ["0.100000", "1.0", "2.0", "3.0", "4.0", ""]
+
+
+def test_record_while_inactive_is_noop(tmp_path):
+    rec = make_recorder(tmp_path)
+    rec.record("/muse/eeg", [1.0, 2.0, 3.0, 4.0], t=0.0)  # before start
+    assert rec.active is False
+    sd = rec.start("museA")
+    rec.stop()
+    rec.record("/muse/eeg", [1.0, 2.0, 3.0, 4.0], t=0.0)  # after stop
+    assert not (sd / "eeg.csv").exists()
+
+
+def test_stop_is_idempotent(tmp_path):
+    rec = make_recorder(tmp_path)
+    rec.start("museA")
+    assert rec.stop() is not None
+    assert rec.stop() is None
+
+
+def test_malformed_message_is_counted_not_raised(tmp_path):
+    rec = make_recorder(tmp_path)
+    sd = rec.start("museA")
+    rec.record("/muse/eeg", [1.0, 2.0, 3.0, 4.0], t=None)  # t=None ok (uses clock)
+
+    class Boom:
+        def __str__(self):
+            raise ValueError("boom")
+
+    rec.record("/muse/eeg", [Boom()], t=0.0)
+    rec.stop()
+    meta = json.loads((sd / "meta.json").read_text())
+    assert meta["errors"] == 1
