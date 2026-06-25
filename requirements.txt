@@ -1,0 +1,8 @@
+python-osc>=1.8
+pyqtgraph>=0.13
+numpy>=1.26
+scipy>=1.11
+PyQt5>=5.15
+trimesh>=4.0
+Pillow>=10.0
+
