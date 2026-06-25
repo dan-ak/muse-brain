@@ -68,6 +68,47 @@ class SessionRecorder:
             self._write_meta("recording")
             return self._session_dir
 
+    def record(self, addr, args, t=None):
+        with self._lock:
+            if not self.active:
+                return
+            try:
+                if t is None:
+                    t = self._clock() - self._t0
+                self._addresses.add(addr)
+                fname, cols, row = self._route(addr, list(args))
+                writer = self._writer_for(fname, cols)
+                writer.writerow([f"{t:.6f}"] + row)
+                self._counts[fname] = self._counts.get(fname, 0) + 1
+            except Exception:
+                self._errors += 1
+
+    def _route(self, addr, args):
+        if addr in self.FIXED:
+            fname, base = self.FIXED[addr]
+            cols = self._columns.get(fname)
+            if cols is None:  # lock column count from the first message
+                ncols = max(len(base), len(args))
+                cols = base + [f"v{i}" for i in range(len(base), ncols)]
+            ncols = len(cols)
+            row = [str(a) for a in args[:ncols]]
+            row += [""] * (ncols - len(row))
+            return fname, cols, row
+        # (elements + catch-all added in Task 4)
+        return "other.csv", ["addr", "values"], [addr, "|".join(str(a) for a in args)]
+
+    def _writer_for(self, fname, cols):
+        writer = self._writers.get(fname)
+        if writer is None:
+            f = open(self._session_dir / fname, "w", newline="", buffering=1)
+            self._files[fname] = f
+            writer = csv.writer(f)
+            writer.writerow(["t"] + cols)
+            self._writers[fname] = writer
+            self._counts.setdefault(fname, 0)
+            self._columns[fname] = cols
+        return writer
+
     def stop(self):
         with self._lock:
             if not self.active:

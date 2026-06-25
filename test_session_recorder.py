@@ -56,3 +56,32 @@ def test_stop_finalizes_meta_with_duration_and_complete_status(tmp_path):
     assert meta["status"] == "complete"
     assert meta["end_iso"] == "2026-06-25T14:30:00"
     assert meta["duration_s"] == 5.5
+
+
+def _read_csv(path):
+    lines = Path(path).read_text().strip().splitlines()
+    return [ln.split(",") for ln in lines]
+
+
+def test_records_fixed_streams_to_their_own_csvs(tmp_path):
+    rec = make_recorder(tmp_path)
+    sd = rec.start("museA")
+    rec.record("/muse/eeg", [1.0, 2.0, 3.0, 4.0], t=0.0)
+    rec.record("/muse/eeg", [5.0, 6.0, 7.0, 8.0], t=0.5)
+    rec.record("/muse/gyro", [10.0, 11.0, 12.0], t=0.5)
+    rec.stop()
+
+    eeg = _read_csv(sd / "eeg.csv")
+    assert eeg[0] == ["t", "TP9", "AF7", "AF8", "TP10"]
+    assert eeg[1] == ["0.000000", "1.0", "2.0", "3.0", "4.0"]
+    assert eeg[2] == ["0.500000", "5.0", "6.0", "7.0", "8.0"]
+
+    gyro = _read_csv(sd / "gyro.csv")
+    assert gyro[0] == ["t", "x", "y", "z"]
+    assert gyro[1] == ["0.500000", "10.0", "11.0", "12.0"]
+
+    meta = json.loads((sd / "meta.json").read_text())
+    assert meta["streams"]["eeg.csv"] == 2
+    assert meta["streams"]["gyro.csv"] == 1
+    assert meta["addresses"] == ["/muse/eeg", "/muse/gyro"]
+    assert meta["columns"]["eeg.csv"] == ["t", "TP9", "AF7", "AF8", "TP10"]
