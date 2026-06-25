@@ -393,10 +393,17 @@ class OSCReceiver:
 
 
 class MuseDashboard(QtWidgets.QMainWindow):
-    def __init__(self, receiver: OSCReceiver, port: int):
+    def __init__(self, receiver: OSCReceiver, port: int,
+                 rec_dir: str = "recordings", label: str = "muse", subject: str = ""):
         super().__init__()
         self.receiver = receiver
         self.filters = FilterBank()
+        self.recorder = SessionRecorder(base_dir=rec_dir)
+        self.receiver.recorder = self.recorder
+        self._default_label = label
+        self._default_subject = subject
+        self._rec_start_mono = 0.0
+        self._rec_start_count = 0
         self.display = {name: np.zeros(BUFFER_SIZE, dtype=np.float64) for name in BANDS}
 
         # Theta/Beta ratio: rolling window of squared filtered samples per band.
@@ -569,6 +576,43 @@ class MuseDashboard(QtWidgets.QMainWindow):
         metrics_layout.addWidget(tbr_graphics, stretch=1)
         right_layout.addWidget(metrics_widget, stretch=2)
 
+        # Recording controls: editable label/subject + a REC indicator.
+        rec_row = QtWidgets.QWidget()
+        rec_layout = QtWidgets.QHBoxLayout(rec_row)
+        rec_layout.setContentsMargins(8, 0, 8, 0)
+        rec_layout.setSpacing(6)
+
+        self.rec_indicator = QtWidgets.QLabel("● REC")
+        self.rec_indicator.setStyleSheet(
+            "color: #ff3b3b; font: bold 13pt 'monospace';"
+            "background-color: transparent;")
+        self.rec_indicator.setVisible(False)
+
+        label_caption = QtWidgets.QLabel("label")
+        label_caption.setStyleSheet("color: #aaaaaa; font: 10pt 'sans-serif';")
+        self.label_edit = QtWidgets.QLineEdit(self._default_label)
+        self.label_edit.setMaximumWidth(140)
+        self.label_edit.setStyleSheet(
+            "color: #ffffff; background-color: #222; border: 1px solid #444;"
+            "padding: 2px;")
+
+        subject_caption = QtWidgets.QLabel("subject")
+        subject_caption.setStyleSheet("color: #aaaaaa; font: 10pt 'sans-serif';")
+        self.subject_edit = QtWidgets.QLineEdit(self._default_subject)
+        self.subject_edit.setMaximumWidth(140)
+        self.subject_edit.setStyleSheet(
+            "color: #ffffff; background-color: #222; border: 1px solid #444;"
+            "padding: 2px;")
+
+        rec_layout.addWidget(self.rec_indicator)
+        rec_layout.addStretch(1)
+        rec_layout.addWidget(label_caption)
+        rec_layout.addWidget(self.label_edit)
+        rec_layout.addWidget(subject_caption)
+        rec_layout.addWidget(self.subject_edit)
+        rec_row.setMaximumHeight(40)
+        right_layout.addWidget(rec_row)
+
         self.status_label = QtWidgets.QLabel(f"Waiting for data on :{port}…")
         self.status_label.setStyleSheet(
             "color: #ffffff; font: 11pt 'monospace'; padding: 2px 6px;"
@@ -589,11 +633,36 @@ class MuseDashboard(QtWidgets.QMainWindow):
 
         self._style_shortcut = QtWidgets.QShortcut(
             QtGui.QKeySequence("h"), self, activated=self._cycle_head_style)
+        self._record_shortcut = QtWidgets.QShortcut(
+            QtGui.QKeySequence("r"), self, activated=self._toggle_record)
 
     def _cycle_head_style(self):
         self._style_idx = (self._style_idx + 1) % len(HEAD_STYLES)
         self.current_style = HEAD_STYLES[self._style_idx]
         self._render_head()
+
+    def _toggle_record(self):
+        if self.recorder.active:
+            session_dir = self.recorder.stop()
+            self.rec_indicator.setVisible(False)
+            self.label_edit.setEnabled(True)
+            self.subject_edit.setEnabled(True)
+            if session_dir is not None:
+                self.status_label.setText(f"Saved recording → {session_dir}")
+        else:
+            label = self.label_edit.text().strip() or self._default_label
+            subject = self.subject_edit.text().strip()
+            try:
+                self.recorder.start(label, subject)
+            except OSError as exc:
+                self.status_label.setText(f"Recording failed: {exc}")
+                return
+            self._rec_start_mono = time.monotonic()
+            with self.receiver.lock:
+                self._rec_start_count = self.receiver.eeg_count
+            self.rec_indicator.setVisible(True)
+            self.label_edit.setEnabled(False)
+            self.subject_edit.setEnabled(False)
 
     def _render_head(self):
         R = self.orientation.matrix()
@@ -701,9 +770,16 @@ class MuseDashboard(QtWidgets.QMainWindow):
             self.tbr_bar.setOpts(height=[0.0])
             self.tbr_value_label.setText("TBR: —")
 
+        rec_suffix = ""
+        if self.recorder.active:
+            elapsed = time.monotonic() - self._rec_start_mono
+            rec_samples = count - self._rec_start_count
+            mm, ss = divmod(int(elapsed), 60)
+            rec_suffix = f"   REC {mm:02d}:{ss:02d} · {rec_samples} samples"
+            self.rec_indicator.setText("● REC" if int(elapsed) % 2 == 0 else "○ REC")
         self.status_label.setText(
             f"EEG samples {count:>7d}  rate {rate:>3d} Hz   "
-            f"gyro {gx:+6.1f} {gy:+6.1f} {gz:+6.1f}"
+            f"gyro {gx:+6.1f} {gy:+6.1f} {gz:+6.1f}{rec_suffix}"
         )
 
 
@@ -711,6 +787,12 @@ def main():
     parser = argparse.ArgumentParser(description="Muse 2 OSC visualizer")
     parser.add_argument("--host", default="0.0.0.0", help="bind address (default: all interfaces)")
     parser.add_argument("--port", type=int, default=5000, help="OSC UDP port (default: 5000)")
+    parser.add_argument("--label", default="muse",
+                        help="default session label / device name (editable in-app)")
+    parser.add_argument("--subject", default="",
+                        help="default subject name (editable in-app)")
+    parser.add_argument("--rec-dir", default="recordings",
+                        help="directory to write session recordings into")
     args = parser.parse_args()
 
     receiver = OSCReceiver(host=args.host, port=args.port)
@@ -718,7 +800,8 @@ def main():
     print(f"OSC server listening on {args.host}:{args.port}", file=sys.stderr)
 
     app = QtWidgets.QApplication(sys.argv)
-    win = MuseDashboard(receiver, args.port)
+    win = MuseDashboard(receiver, args.port, rec_dir=args.rec_dir,
+                        label=args.label, subject=args.subject)
     win.show()
     try:
         rc = app.exec_()
