@@ -38,6 +38,17 @@ def main():
             gy = 50 * math.cos(2 * math.pi * 0.2 * t)
             client.send_message("/muse/gyro", [gx, gy, 0.0])
 
+        if i % 32 == 0:  # 8 Hz accelerometer updates
+            ax = 0.02 * math.sin(2 * math.pi * 0.2 * t)
+            ay = 0.02 * math.cos(2 * math.pi * 0.2 * t)
+            client.send_message("/muse/acc", [ax, ay, 1.0])
+
+        if i % 256 == 0:  # 1 Hz band-power elements
+            theta = -0.5 + 0.2 * math.sin(2 * math.pi * 0.1 * t)
+            beta = -0.8 + 0.2 * math.cos(2 * math.pi * 0.1 * t)
+            client.send_message("/muse/elements/theta_absolute", [theta] * 4)
+            client.send_message("/muse/elements/beta_absolute", [beta] * 4)
+
         i += 1
         t += period
         next_t += period
