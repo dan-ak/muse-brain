@@ -40,8 +40,12 @@ existing visualizer (`_update_status` in `muse_visualizer.py`).
 
 - **Source:** `receiver.latest_band_powers()` returns `(theta_log, beta_log)` —
   Mind Monitor's pre-computed `theta_absolute` / `beta_absolute` (already in
-  log10 space). When no `elements` messages have arrived yet, fall back to the
-  FilterBank-derived theta/beta power buffers the app already maintains.
+  log10 space). This is non-destructive (unlike `drain_eeg()`, which clears the
+  buffer the dashboard consumes), so both views can share one receiver. Until
+  `elements` messages arrive the signal is NaN and the cursor freezes with a
+  "waiting for signal…" overlay. (The dashboard's FilterBank power fallback is
+  intentionally *not* reused here: it would mean draining the same EEG buffer
+  the always-running dashboard timer already drains.)
 - **Focus signal:** `r = beta_log − theta_log` (higher = more focused). This is
   `−log10(TBR)`, kept in log space because it is symmetric and well-behaved.
 - **Smoothing:** exponential moving average of `r` with ~0.7 s time constant to
