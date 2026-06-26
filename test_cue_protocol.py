@@ -37,3 +37,50 @@ def test_odd_n_cues_rounded_down_to_balance():
     seq = build_sequence(n_cues=5, seed=0)
     cues = [t.kind for t in seq if t.kind in (FOCUS, RELAX)]
     assert len(cues) == 4   # 5 // 2 * 2
+
+
+from cue_protocol import CueSession, SessionState
+
+
+class FakeClock:
+    def __init__(self, t=0.0):
+        self.t = t
+
+    def __call__(self):
+        return self.t
+
+
+def _one_cue_seq():
+    # rest(5) -> focus(10) -> rest(5); cumulative ends = [5, 15, 20]
+    return [Trial(REST, 5.0), Trial(FOCUS, 10.0, "right"), Trial(REST, 5.0)]
+
+
+def test_session_reports_leading_rest():
+    clk = FakeClock(0.0)
+    s = CueSession(_one_cue_seq(), clock_fn=clk)
+    st = s.update(0.0)
+    assert isinstance(st, SessionState)
+    assert st.phase == REST
+    assert st.done is False
+    assert st.time_remaining == 5.0
+
+
+def test_session_reports_active_cue_and_countdown():
+    clk = FakeClock(0.0)
+    s = CueSession(_one_cue_seq(), clock_fn=clk)
+    s.update(0.0)
+    clk.t = 7.0
+    st = s.update(0.0)
+    assert st.phase == FOCUS
+    assert st.goal_side == "right"
+    assert st.time_remaining == 8.0   # ends[1]=15 - elapsed 7
+    assert st.cue_number == 1
+
+
+def test_session_marks_done_after_last_trial():
+    clk = FakeClock(0.0)
+    s = CueSession(_one_cue_seq(), clock_fn=clk)
+    s.update(0.0)
+    clk.t = 20.0
+    st = s.update(0.0)
+    assert st.done is True
