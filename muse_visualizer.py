@@ -24,6 +24,7 @@ from pythonosc import dispatcher, osc_server
 from scipy.signal import butter, sosfilt, sosfilt_zi
 
 from session_recorder import SessionRecorder
+from neurofeedback_view import NeurofeedbackView
 
 SAMPLE_RATE = 256                       # Muse 2 EEG sample rate
 WINDOW_SEC = 5
@@ -394,7 +395,8 @@ class OSCReceiver:
 
 class MuseDashboard(QtWidgets.QMainWindow):
     def __init__(self, receiver: OSCReceiver, port: int,
-                 rec_dir: str = "recordings", label: str = "muse", subject: str = ""):
+                 rec_dir: str = "recordings", label: str = "muse", subject: str = "",
+                 nf_cues: int = 8, nf_seed: int = 0):
         super().__init__()
         self.receiver = receiver
         self.filters = FilterBank()
@@ -402,6 +404,8 @@ class MuseDashboard(QtWidgets.QMainWindow):
         self.receiver.recorder = self.recorder
         self._default_label = label
         self._default_subject = subject
+        self._nf_cues = nf_cues
+        self._nf_seed = nf_seed
         self._rec_start_mono = 0.0
         self._rec_start_count = 0
         self.display = {name: np.zeros(BUFFER_SIZE, dtype=np.float64) for name in BANDS}
@@ -417,7 +421,7 @@ class MuseDashboard(QtWidgets.QMainWindow):
         pg.setConfigOptions(antialias=True, background="#000000", foreground="#ffffff")
 
         central = QtWidgets.QWidget()
-        self.setCentralWidget(central)
+        self._dashboard_page = central
         layout = QtWidgets.QHBoxLayout(central)
         layout.setContentsMargins(4, 4, 4, 4)
         layout.setSpacing(4)
@@ -636,12 +640,50 @@ class MuseDashboard(QtWidgets.QMainWindow):
         self._record_shortcut = QtWidgets.QShortcut(
             QtGui.QKeySequence("r"), self, activated=self._toggle_record)
 
+        self.stack = QtWidgets.QStackedWidget()
+        self.stack.addWidget(self._dashboard_page)      # page 0: dashboard
+        self.nf_view = NeurofeedbackView(
+            self.receiver, self.recorder,
+            label_fn=lambda: self.label_edit.text().strip() or self._default_label,
+            subject_fn=lambda: self.subject_edit.text().strip(),
+            n_cues=self._nf_cues, seed=self._nf_seed)
+        self.stack.addWidget(self.nf_view)              # page 1: neurofeedback
+        self.setCentralWidget(self.stack)
+
+        self._view_shortcut = QtWidgets.QShortcut(
+            QtGui.QKeySequence("n"), self, activated=self._toggle_view)
+        self._calib_shortcut = QtWidgets.QShortcut(
+            QtGui.QKeySequence("c"), self, activated=self._nf_calibrate)
+        self._recenter_shortcut = QtWidgets.QShortcut(
+            QtGui.QKeySequence("0"), self, activated=self._nf_recenter)
+        self._trial_shortcut = QtWidgets.QShortcut(
+            QtGui.QKeySequence("t"), self, activated=self._nf_toggle_session)
+
+    def _toggle_view(self):
+        page = (self._dashboard_page if self.stack.currentWidget() is self.nf_view
+                else self.nf_view)
+        self.stack.setCurrentWidget(page)
+
+    def _nf_calibrate(self):
+        if self.stack.currentWidget() is self.nf_view:
+            self.nf_view.start_calibration()
+
+    def _nf_recenter(self):
+        if self.stack.currentWidget() is self.nf_view:
+            self.nf_view.recenter()
+
+    def _nf_toggle_session(self):
+        if self.stack.currentWidget() is self.nf_view:
+            self.nf_view.toggle_session()
+
     def _cycle_head_style(self):
         self._style_idx = (self._style_idx + 1) % len(HEAD_STYLES)
         self.current_style = HEAD_STYLES[self._style_idx]
         self._render_head()
 
     def _toggle_record(self):
+        if self.stack.currentWidget() is self.nf_view:
+            return  # 'r' records only on the dashboard; use 't' for cued sessions
         if self.recorder.active:
             session_dir = self.recorder.stop()
             self.rec_indicator.setVisible(False)
@@ -793,6 +835,10 @@ def main():
                         help="default subject name (editable in-app)")
     parser.add_argument("--rec-dir", default="recordings",
                         help="directory to write session recordings into")
+    parser.add_argument("--nf-trials", type=int, default=8,
+                        help="number of cued FOCUS/RELAX trials per session")
+    parser.add_argument("--nf-seed", type=int, default=0,
+                        help="random seed for cued-trial order")
     args = parser.parse_args()
 
     receiver = OSCReceiver(host=args.host, port=args.port)
@@ -801,12 +847,14 @@ def main():
 
     app = QtWidgets.QApplication(sys.argv)
     win = MuseDashboard(receiver, args.port, rec_dir=args.rec_dir,
-                        label=args.label, subject=args.subject)
+                        label=args.label, subject=args.subject,
+                        nf_cues=args.nf_trials, nf_seed=args.nf_seed)
     win.show()
     try:
         rc = app.exec_()
     finally:
-        win.recorder.stop()  # finalize meta.json + close files if mid-recording
+        win.nf_view.shutdown()   # flush cues/feedback if a cued session is open
+        win.recorder.stop()      # finalize meta.json + close files if mid-recording
         receiver.stop()
     sys.exit(rc)
 

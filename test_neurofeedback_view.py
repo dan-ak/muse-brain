@@ -76,3 +76,21 @@ def test_session_records_raw_and_derived_streams(app, tmp_path):
         assert "protocol" in meta
     finally:
         receiver.server.server_close()
+
+
+def test_dashboard_hosts_neurofeedback_view_and_toggles(app, tmp_path):
+    from muse_visualizer import MuseDashboard
+
+    receiver = OSCReceiver(host="127.0.0.1", port=0)
+    try:
+        win = MuseDashboard(receiver, port=0, rec_dir=str(tmp_path),
+                            label="museA", subject="dan")
+        assert hasattr(win, "nf_view")
+        assert win.stack.currentWidget() is not win.nf_view
+        win._toggle_view()
+        assert win.stack.currentWidget() is win.nf_view
+        # 'r' record is a no-op while on the neurofeedback page
+        win._toggle_record()
+        assert win.recorder.active is False
+    finally:
+        receiver.server.server_close()
