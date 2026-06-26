@@ -84,3 +84,43 @@ def test_session_marks_done_after_last_trial():
     clk.t = 20.0
     st = s.update(0.0)
     assert st.done is True
+
+
+def test_hit_recorded_when_cursor_dwells_in_goal_zone():
+    clk = FakeClock(0.0)
+    s = CueSession(_one_cue_seq(), clock_fn=clk, target=0.8, dwell_needed=1.0)
+    s.update(0.0)                       # leading rest
+    for t in (6.0, 6.5, 7.0, 7.5, 8.0):  # 6.0 transitions in; 4 frames * 0.5s dwell = 2.0s
+        clk.t = t
+        s.update(0.9)                  # in the right zone
+    clk.t = 16.0
+    s.update(0.0)                      # transition to trailing rest -> finalize cue
+    assert len(s.results) == 1
+    assert s.results[0].cue == FOCUS
+    assert s.results[0].hit is True
+    assert s.results[0].dwell_s == 2.0
+
+
+def test_miss_recorded_when_cursor_never_reaches_goal():
+    clk = FakeClock(0.0)
+    s = CueSession(_one_cue_seq(), clock_fn=clk, target=0.8, dwell_needed=1.0)
+    s.update(0.0)
+    for t in (6.0, 6.5, 7.0, 7.5, 8.0):
+        clk.t = t
+        s.update(0.0)                  # never in zone
+    clk.t = 16.0
+    s.update(0.0)
+    assert s.results[0].hit is False
+    assert s.results[0].dwell_s == 0.0
+
+
+def test_transition_frame_does_not_count_dwell():
+    # The large dt of the rest->cue transition frame must not be counted.
+    clk = FakeClock(0.0)
+    s = CueSession(_one_cue_seq(), clock_fn=clk, target=0.8, dwell_needed=1.0)
+    s.update(0.0)
+    clk.t = 6.0
+    s.update(0.9)                      # transition into cue: dt=6 but not counted
+    clk.t = 16.0
+    s.update(0.0)
+    assert s.results[0].dwell_s == 0.0
