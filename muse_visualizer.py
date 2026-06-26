@@ -806,6 +806,7 @@ def main():
     try:
         rc = app.exec_()
     finally:
+        win.recorder.stop()  # finalize meta.json + close files if mid-recording
         receiver.stop()
     sys.exit(rc)
 

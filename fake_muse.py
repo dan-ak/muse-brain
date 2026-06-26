@@ -33,12 +33,10 @@ def main():
         ch = [base + rng.normal(0, 8) for _ in range(4)]
         client.send_message("/muse/eeg", ch)
 
-        if i % 32 == 0:  # 8 Hz gyro updates
+        if i % 32 == 0:  # 8 Hz gyro + accelerometer updates
             gx = 50 * math.sin(2 * math.pi * 0.2 * t)
             gy = 50 * math.cos(2 * math.pi * 0.2 * t)
             client.send_message("/muse/gyro", [gx, gy, 0.0])
-
-        if i % 32 == 0:  # 8 Hz accelerometer updates
             ax = 0.02 * math.sin(2 * math.pi * 0.2 * t)
             ay = 0.02 * math.cos(2 * math.pi * 0.2 * t)
             client.send_message("/muse/acc", [ax, ay, 1.0])
