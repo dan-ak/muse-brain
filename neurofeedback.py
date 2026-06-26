@@ -64,3 +64,42 @@ class Calibrator:
         if half_range < min_range:
             return baseline, 1.0, False
         return baseline, half_range, True
+
+
+class FocusCursor:
+    """Velocity-accumulator cursor driven by the (smoothed) focus signal.
+
+    ``update`` EMA-smooths the raw signal, converts it to a drive in [-1, 1]
+    using the calibrated baseline/half_range, integrates velocity with a gentle
+    self-centering leak, and clamps the position to [-1, 1]. A NaN input freezes
+    the cursor (no band data).
+    """
+
+    def __init__(self, gain: float = 0.4, leak: float = 0.1, tau: float = 0.7,
+                 baseline: float = 0.0, half_range: float = 1.0):
+        self.gain = gain          # position units per second at full drive
+        self.leak = leak          # self-centering rate (~1/leak seconds)
+        self.tau = tau            # EMA smoothing time constant (seconds)
+        self.baseline = baseline
+        self.half_range = half_range if half_range > 1e-9 else 1.0
+        self.x = 0.0              # position in [-1, 1]
+        self.smoothed = float("nan")
+        self.drive = 0.0
+
+    def set_calibration(self, baseline: float, half_range: float) -> None:
+        self.baseline = baseline
+        self.half_range = half_range if half_range > 1e-9 else 1.0
+
+    def recenter(self) -> None:
+        self.x = 0.0
+
+    def update(self, raw_signal: float, dt: float) -> float:
+        if math.isnan(raw_signal):
+            return self.x        # freeze: no data
+        self.smoothed = ema(self.smoothed, raw_signal, dt, self.tau)
+        d = (self.smoothed - self.baseline) / self.half_range
+        d = max(-1.0, min(1.0, d))
+        self.drive = d
+        self.x += (self.gain * d - self.leak * self.x) * dt
+        self.x = max(-1.0, min(1.0, self.x))
+        return self.x
