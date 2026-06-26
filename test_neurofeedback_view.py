@@ -94,3 +94,25 @@ def test_dashboard_hosts_neurofeedback_view_and_toggles(app, tmp_path):
         assert win.recorder.active is False
     finally:
         receiver.server.server_close()
+
+
+def test_dashboard_r_does_not_clobber_running_nf_session(app, tmp_path):
+    import time as _time
+    from muse_visualizer import MuseDashboard
+
+    receiver = OSCReceiver(host="127.0.0.1", port=0)
+    try:
+        win = MuseDashboard(receiver, port=0, rec_dir=str(tmp_path), label="museA")
+        with receiver.lock:
+            receiver.theta_abs, receiver.beta_abs = 0.0, 1.0
+            receiver.bands_ts = _time.monotonic()
+        win._toggle_view()             # to NF page
+        win.nf_view.toggle_session()   # start cued session (starts recorder)
+        assert win.recorder.active is True
+        win._toggle_view()             # back to dashboard page
+        win._toggle_record()           # 'r' must NOT stop the running NF session
+        assert win.recorder.active is True
+        assert win.nf_view.session is not None
+        win.nf_view._stop_session()    # clean up
+    finally:
+        receiver.server.server_close()

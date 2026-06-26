@@ -75,7 +75,7 @@ class FocusCursor:
     the cursor (no band data).
     """
 
-    def __init__(self, gain: float = 0.4, leak: float = 0.1, tau: float = 0.7,
+    def __init__(self, gain: float = 0.25, leak: float = 0.1, tau: float = 0.7,
                  baseline: float = 0.0, half_range: float = 1.0):
         self.gain = gain          # position units per second at full drive
         self.leak = leak          # self-centering rate (~1/leak seconds)

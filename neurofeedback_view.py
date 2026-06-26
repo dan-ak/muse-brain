@@ -80,7 +80,9 @@ class NeurofeedbackView(QtWidgets.QWidget):
             brush=pg.mkBrush(220, 200, 70, 60)))
         self.plot.addItem(pg.InfiniteLine(pos=0.0, angle=90,
                           pen=pg.mkPen(120, 120, 140, width=1)))
-        self.plot.addItem(pg.TextItem("RELAX ◀", color=(150, 190, 255), anchor=(0, 0.5)))
+        left_lbl = pg.TextItem("RELAX ◀", color=(150, 190, 255), anchor=(0, 0.5))
+        left_lbl.setPos(-1.1, 0.85)
+        self.plot.addItem(left_lbl)
         right_lbl = pg.TextItem("▶ FOCUS", color=(255, 230, 130), anchor=(1, 0.5))
         right_lbl.setPos(1.1, 0.85)
         self.plot.addItem(right_lbl)

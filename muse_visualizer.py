@@ -682,8 +682,8 @@ class MuseDashboard(QtWidgets.QMainWindow):
         self._render_head()
 
     def _toggle_record(self):
-        if self.stack.currentWidget() is self.nf_view:
-            return  # 'r' records only on the dashboard; use 't' for cued sessions
+        if self.stack.currentWidget() is self.nf_view or self.nf_view.session is not None:
+            return  # 'r' records only on the dashboard, and never while a cued session runs
         if self.recorder.active:
             session_dir = self.recorder.stop()
             self.rec_indicator.setVisible(False)
