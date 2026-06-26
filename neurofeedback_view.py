@@ -224,7 +224,6 @@ class NeurofeedbackView(QtWidgets.QWidget):
         if self.logger is not None:
             self.logger.close()
             self.logger = None
-        self.receiver.recorder = None
         hits = sum(1 for r in (self.session.results if self.session else []) if r.hit)
         total = len(self.session.results) if self.session else 0
         session_dir = self.recorder.stop()
