@@ -147,6 +147,8 @@ class SessionRecorder:
         if status == "complete":
             meta["end_iso"] = self._now().isoformat(timespec="seconds")
             meta["duration_s"] = round(self._clock() - self._t0, 3)
+        # Caller-supplied keys take precedence; only pass non-standard keys
+        # (e.g. mode/calibration/protocol) to avoid clobbering the fields above.
         meta.update(self._extra_meta)
         with open(self._session_dir / "meta.json", "w") as f:
             json.dump(meta, f, indent=2)
