@@ -179,3 +179,17 @@ def test_receiver_taps_raw_eeg_and_unmapped_streams(tmp_path):
     acc = _read_csv(sd / "acc.csv")
     assert acc[0] == ["t", "x", "y", "z"]
     assert acc[1][1:] == ["0.1", "0.2", "9.8"]
+
+
+def test_start_merges_extra_meta_into_meta_json(tmp_path):
+    rec = make_recorder(tmp_path)
+    sd = rec.start("museA", extra_meta={"mode": "neurofeedback",
+                                        "baseline": 1.5, "half_range": 0.8})
+    rec.stop()
+    meta = json.loads((sd / "meta.json").read_text())
+    assert meta["mode"] == "neurofeedback"
+    assert meta["baseline"] == 1.5
+    assert meta["half_range"] == 0.8
+    # standard keys still present
+    assert meta["label"] == "museA"
+    assert meta["status"] == "complete"

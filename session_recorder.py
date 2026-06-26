@@ -41,16 +41,18 @@ class SessionRecorder:
         self._label = ""
         self._subject = ""
         self._errors = 0
+        self._extra_meta = {}
 
     @staticmethod
     def _safe(label):
         cleaned = "".join(c if c.isalnum() or c in "-_" else "_" for c in label)
         return cleaned or "muse"
 
-    def start(self, label, subject=""):
+    def start(self, label, subject="", extra_meta=None):
         with self._lock:
             if self.active:
                 return self._session_dir
+            self._extra_meta = dict(extra_meta or {})
             self._start_dt = self._now()
             self._t0 = self._clock()
             self._label = label
@@ -145,5 +147,6 @@ class SessionRecorder:
         if status == "complete":
             meta["end_iso"] = self._now().isoformat(timespec="seconds")
             meta["duration_s"] = round(self._clock() - self._t0, 3)
+        meta.update(self._extra_meta)
         with open(self._session_dir / "meta.json", "w") as f:
             json.dump(meta, f, indent=2)
