@@ -24,6 +24,8 @@ TARGET = 0.8           # |cursor| past this = inside a target zone
 DWELL = 1.0            # seconds in-zone to score a hit
 RELAX_SECS = 20.0      # guided-calibration relax phase
 FOCUS_SECS = 20.0      # guided-calibration focus phase
+CALIB_SETTLE_S = 3.0   # ignore samples in the first few seconds of each phase
+                       # (startle/adjustment artifacts when a cue just changed)
 
 
 class NeurofeedbackView(QtWidgets.QWidget):
@@ -45,6 +47,7 @@ class NeurofeedbackView(QtWidgets.QWidget):
 
         self._calibrator = None
         self._calib_phase = None   # None | "relax" | "focus"
+        self._calib_phase_start = 0.0
         self._calib_until = 0.0
         self._calib_baseline = self.cursor.baseline
         self._calib_half_range = self.cursor.half_range
@@ -111,7 +114,8 @@ class NeurofeedbackView(QtWidgets.QWidget):
             return
         self._calibrator = Calibrator()
         self._calib_phase = "relax"
-        self._calib_until = time.monotonic() + RELAX_SECS
+        self._calib_phase_start = time.monotonic()
+        self._calib_until = self._calib_phase_start + RELAX_SECS
 
     def toggle_session(self):
         if self.session is not None:
@@ -191,15 +195,21 @@ class NeurofeedbackView(QtWidgets.QWidget):
     def _tick_calibration(self, now, raw):
         remaining = max(0.0, self._calib_until - now)
         secs = int(math.ceil(remaining))
+        settled = (now - self._calib_phase_start) >= CALIB_SETTLE_S
         if self._calib_phase == "relax":
-            self._calibrator.add_relax(raw)
-            self.cue_label.setText(f"RELAX…  {secs}s")
+            if settled:
+                self._calibrator.add_relax(raw)
+            label = f"RELAX…  {secs}s" if settled else f"RELAX… settling…  {secs}s"
+            self.cue_label.setText(label)
             if remaining <= 0.0:
                 self._calib_phase = "focus"
+                self._calib_phase_start = now
                 self._calib_until = now + FOCUS_SECS
         elif self._calib_phase == "focus":
-            self._calibrator.add_focus(raw)
-            self.cue_label.setText(f"FOCUS…  {secs}s")
+            if settled:
+                self._calibrator.add_focus(raw)
+            label = f"FOCUS…  {secs}s" if settled else f"FOCUS… settling…  {secs}s"
+            self.cue_label.setText(label)
             if remaining <= 0.0:
                 baseline, half_range, ok = self._calibrator.result()
                 if ok:

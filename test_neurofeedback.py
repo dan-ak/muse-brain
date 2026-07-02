@@ -116,3 +116,15 @@ def test_cursor_set_calibration_guards_zero_range():
     c.set_calibration(baseline=2.0, half_range=0.0)
     assert c.baseline == 2.0
     assert c.half_range == 1.0   # zero replaced with safe 1.0
+
+
+def test_cursor_steady_state_never_exceeds_sustained_drive():
+    # gain == leak by default: steady-state x_eq = (gain/leak)*d = d, so a
+    # persistent partial drive settles at that same fraction and never creeps
+    # past it. If gain/leak > 1, small persistent biases eventually saturate
+    # the cursor at +/-1 regardless of how weak the drive is.
+    c = FocusCursor(tau=0.0, baseline=0.0, half_range=1.0)
+    assert c.gain == c.leak
+    for _ in range(2000):        # let it fully settle
+        c.update(0.3, dt=0.05)   # persistent, moderate drive (d = 0.3)
+    assert math.isclose(c.x, 0.3, abs_tol=0.01)

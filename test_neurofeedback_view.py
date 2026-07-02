@@ -96,6 +96,19 @@ def test_dashboard_hosts_neurofeedback_view_and_toggles(app, tmp_path):
         receiver.server.server_close()
 
 
+def test_calibration_ignores_samples_during_settle_window(app, tmp_path):
+    receiver, recorder, view = _make_view(tmp_path)
+    try:
+        view.start_calibration()
+        t0 = view._calib_phase_start
+        view._tick_calibration(t0 + 1.0, 5.0)   # within settle window: ignored
+        assert len(view._calibrator._relax) == 0
+        view._tick_calibration(t0 + 3.5, 7.0)   # past settle window: recorded
+        assert view._calibrator._relax == [7.0]
+    finally:
+        receiver.server.server_close()
+
+
 def test_dashboard_r_does_not_clobber_running_nf_session(app, tmp_path):
     import time as _time
     from muse_visualizer import MuseDashboard

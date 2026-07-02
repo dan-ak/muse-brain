@@ -73,9 +73,15 @@ class FocusCursor:
     using the calibrated baseline/half_range, integrates velocity with a gentle
     self-centering leak, and clamps the position to [-1, 1]. A NaN input freezes
     the cursor (no band data).
+
+    Steady-state position for a *sustained* drive ``d`` is ``(gain/leak)*d`` —
+    keep ``gain <= leak`` so the cursor never settles past the drive that's
+    actually driving it. A larger ratio lets small persistent biases (e.g. a
+    slightly off calibration) creep the whole way to +/-1 given enough dwell
+    time, which reads as the cursor being permanently stuck to one side.
     """
 
-    def __init__(self, gain: float = 0.25, leak: float = 0.1, tau: float = 0.7,
+    def __init__(self, gain: float = 0.4, leak: float = 0.4, tau: float = 0.7,
                  baseline: float = 0.0, half_range: float = 1.0):
         self.gain = gain          # position units per second at full drive
         self.leak = leak          # self-centering rate (~1/leak seconds)
