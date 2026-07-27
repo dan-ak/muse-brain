@@ -50,7 +50,9 @@ async def handler(websocket):
                 # Clear line and print live values
                 print(f"\rP1: {player_states['p1']['normalized']:+0.2f} | P2: {player_states['p2']['normalized']:+0.2f}", end="", flush=True)
 
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ValueError, TypeError):
+                # Malformed/incomplete message: skip it rather than
+                # tearing down the connection.
                 pass
     except websockets.exceptions.ConnectionClosedError:
         pass
