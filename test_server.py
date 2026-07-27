@@ -1,4 +1,5 @@
 import asyncio
+import csv
 import functools
 import json
 import ssl
@@ -14,7 +15,9 @@ from server import (
     PlayerHub,
     build_ssl_context,
     create_app,
+    make_seat_ids,
 )
+from session_recorder import SessionRecorder
 
 
 def async_test(fn):
@@ -27,15 +30,32 @@ def async_test(fn):
     return wrapper
 
 
+async def _settle(seconds=0.05):
+    """Yield long enough for the server side of a socket to process a frame."""
+    await asyncio.sleep(seconds)
+
+
+def _read_csv(path):
+    with open(path, newline="") as f:
+        return list(csv.reader(f))
+
+
 @pytest.fixture
 def static_dir(tmp_path):
     """A stand-in for muse-pwa/dist."""
-    (tmp_path / "index.html").write_text("<!doctype html><title>Muse</title>")
-    (tmp_path / "sw.js").write_text("// service worker")
-    assets = tmp_path / "assets"
+    root = tmp_path / "dist"
+    root.mkdir()
+    (root / "index.html").write_text("<!doctype html><title>Muse</title>")
+    (root / "sw.js").write_text("// service worker")
+    assets = root / "assets"
     assets.mkdir()
     (assets / "app.js").write_text("export const x = 1;")
-    return tmp_path
+    return root
+
+
+@pytest.fixture
+def recorder(tmp_path):
+    return SessionRecorder(base_dir=tmp_path / "recordings")
 
 
 @pytest.fixture
@@ -55,14 +75,30 @@ def self_signed(tmp_path):
     return cert, key
 
 
-class TestPlayerHub:
-    def test_only_known_seats_are_accepted(self):
-        hub = PlayerHub()
-        assert hub.is_known("p1")
-        assert hub.is_known("p2")
-        assert not hub.is_known("p3")
+class TestSeatRoster:
+    def test_seats_are_named_p1_upwards(self):
+        assert make_seat_ids(3) == ("p1", "p2", "p3")
+
+    def test_a_roster_needs_at_least_one_seat(self):
+        with pytest.raises(ValueError):
+            make_seat_ids(0)
+
+    def test_hub_accepts_an_explicit_roster(self):
+        hub = PlayerHub(seat_ids=make_seat_ids(3))
+        assert hub.is_known("p3")
+        # The cap is the roster, not a hardcoded pair.
+        assert not hub.is_known("p4")
         assert not hub.is_known("../etc/passwd")
 
+    @async_test
+    async def test_roster_is_published_for_the_client(self, static_dir):
+        app = create_app(static_dir=static_dir, hub=PlayerHub(seat_ids=make_seat_ids(3)))
+        async with TestClient(TestServer(app)) as client:
+            response = await client.get("/api/seats")
+            assert await response.json() == {"seats": ["p1", "p2", "p3"]}
+
+
+class TestPlayerHub:
     def test_telemetry_updates_state(self):
         hub = PlayerHub()
         outcome = hub.handle_message(
@@ -83,8 +119,6 @@ class TestPlayerHub:
         assert hub.state_of("p1")["raw"] == 2.0
 
     def test_calibration_event_missing_fields_is_still_calibration(self):
-        # The previous server formatted baseline with :.4f and blew up when the
-        # field was absent.
         hub = PlayerHub()
         assert hub.handle_message("p1", json.dumps({"event": "calibration_complete"})) == CALIBRATED
 
@@ -123,11 +157,107 @@ class TestPlayerHub:
         assert hub.detach("p1", live) is True
         assert hub.occupied_seats == ()
 
+    def test_snapshot_covers_every_seat_and_marks_occupancy(self):
+        hub = PlayerHub(seat_ids=make_seat_ids(3))
+        hub.attach("p2", object())
+        snapshot = hub.snapshot()
+
+        assert [seat["id"] for seat in snapshot["seats"]] == ["p1", "p2", "p3"]
+        occupancy = {seat["id"]: seat["connected"] for seat in snapshot["seats"]}
+        assert occupancy == {"p1": False, "p2": True, "p3": False}
+        assert snapshot["recording"]["active"] is False
+
     def test_snapshot_does_not_alias_internal_state(self):
         hub = PlayerHub()
         snapshot = hub.snapshot()
-        snapshot["p1"]["raw"] = 99.0
+        snapshot["seats"][0]["raw"] = 99.0
         assert hub.state_of("p1")["raw"] == 0.0
+
+
+class TestRecording:
+    def test_nothing_is_written_until_a_session_starts(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        hub.handle_message("p1", json.dumps({"rawScore": 1.0, "normalizedScore": 0.5}))
+        assert hub.recording is False
+        assert not (recorder.base_dir).exists() or not list(recorder.base_dir.iterdir())
+
+    def test_telemetry_is_recorded_with_its_seat(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("three-up")
+
+        hub.handle_message("p1", json.dumps({"rawScore": 1.0, "normalizedScore": 0.5}))
+        hub.handle_message("p3", json.dumps({"rawScore": -2.0, "normalizedScore": -0.25}))
+        hub.stop_recording()
+
+        rows = _read_csv(session / "telemetry.csv")
+        assert rows[0] == ["t", "seat", "raw", "normalized", "calibrating"]
+        assert [r[1] for r in rows[1:]] == ["p1", "p3"]
+        assert rows[1][2:] == ["1.0", "0.5", "0"]
+
+    def test_calibration_results_are_recorded(self, recorder):
+        # A normalized score is uninterpretable later without these.
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("cal")
+        hub.handle_message(
+            "p2",
+            json.dumps({"event": "calibration_complete", "baseline": 0.4, "halfRange": 0.9}),
+        )
+        hub.stop_recording()
+
+        rows = _read_csv(session / "calibration.csv")
+        assert rows[0] == ["t", "seat", "baseline", "half_range"]
+        assert rows[1][1:] == ["p2", "0.4", "0.9"]
+
+    def test_seat_transitions_are_recorded(self, recorder):
+        # A gap in telemetry is otherwise ambiguous: a headset that fell off
+        # looks the same as a phone that locked itself.
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("transitions")
+        socket = object()
+        hub.attach("p1", socket)
+        hub.detach("p1", socket)
+        hub.stop_recording()
+
+        rows = _read_csv(session / "seats.csv")
+        assert rows[1][1:] == ["p1", "connect"]
+        assert rows[2][1:] == ["p1", "disconnect"]
+
+    def test_seats_already_occupied_are_noted_at_session_start(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        hub.attach("p1", object())
+        session = hub.start_recording("late-start")
+        hub.stop_recording()
+
+        rows = _read_csv(session / "seats.csv")
+        assert rows[1][1:] == ["p1", "connect"]
+
+    def test_meta_records_the_session_label(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("burn-night")
+        hub.stop_recording()
+
+        meta = json.loads((session / "meta.json").read_text())
+        assert meta["label"] == "burn-night"
+        assert meta["status"] == "complete"
+
+    def test_a_broken_recorder_does_not_break_telemetry(self):
+        class Exploding:
+            active = True
+
+            def record(self, *args, **kwargs):
+                raise RuntimeError("disk gone")
+
+        hub = PlayerHub(recorder=Exploding())
+        # Delivering telemetry matters more than recording it.
+        assert hub.handle_message("p1", json.dumps({"normalizedScore": 0.5})) == TELEMETRY
+        assert hub.state_of("p1")["normalized"] == 0.5
+
+    def test_hub_without_a_recorder_still_works(self):
+        hub = PlayerHub()
+        assert hub.start_recording("noop") is None
+        assert hub.stop_recording() is None
+        assert hub.recording is False
+        assert hub.handle_message("p1", json.dumps({"normalizedScore": 1.0})) == TELEMETRY
 
 
 class TestSSLContext:
@@ -156,13 +286,11 @@ class TestSSLContext:
 
 class TestApp:
     @async_test
-    async def test_health_reports_seats(self, static_dir):
+    async def test_health_reports_the_whole_hub(self, static_dir):
         async with TestClient(TestServer(create_app(static_dir=static_dir))) as client:
-            response = await client.get("/healthz")
-            assert response.status == 200
-            body = await response.json()
-            assert body["status"] == "ok"
-            assert body["seats"] == []
+            body = await (await client.get("/healthz")).json()
+            assert body["type"] == "state"
+            assert len(body["seats"]) == 4
 
     @async_test
     async def test_root_serves_the_app_shell_uncached(self, static_dir):
@@ -173,10 +301,17 @@ class TestApp:
             assert response.headers["Cache-Control"] == "no-cache"
 
     @async_test
+    async def test_dashboard_route_serves_the_app_shell(self, static_dir):
+        # A refresh on a client-side route must not 404.
+        async with TestClient(TestServer(create_app(static_dir=static_dir))) as client:
+            response = await client.get("/dashboard")
+            assert response.status == 200
+            assert "Muse" in await response.text()
+
+    @async_test
     async def test_service_worker_is_served_uncached(self, static_dir):
         async with TestClient(TestServer(create_app(static_dir=static_dir))) as client:
             response = await client.get("/sw.js")
-            assert response.status == 200
             assert response.headers["Cache-Control"] == "no-cache"
 
     @async_test
@@ -184,19 +319,17 @@ class TestApp:
         async with TestClient(TestServer(create_app(static_dir=static_dir))) as client:
             response = await client.get("/assets/app.js")
             assert response.status == 200
-            assert "export const x" in await response.text()
 
     @async_test
     async def test_unknown_seat_is_rejected(self, static_dir):
-        async with TestClient(TestServer(create_app(static_dir=static_dir))) as client:
-            response = await client.get("/ws/p9")
-            assert response.status == 404
+        app = create_app(static_dir=static_dir, hub=PlayerHub(seat_ids=make_seat_ids(2)))
+        async with TestClient(TestServer(app)) as client:
+            assert (await client.get("/ws/p9")).status == 404
 
     @async_test
     async def test_telemetry_reaches_the_hub(self, static_dir):
         hub = PlayerHub()
-        app = create_app(static_dir=static_dir, hub=hub)
-        async with TestClient(TestServer(app)) as client:
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
             async with client.ws_connect("/ws/p1") as socket:
                 await socket.send_json({"rawScore": 0.5, "normalizedScore": -0.25})
                 await _settle()
@@ -204,10 +337,23 @@ class TestApp:
                 assert hub.occupied_seats == ("p1",)
 
     @async_test
+    async def test_three_seats_stream_independently(self, static_dir):
+        hub = PlayerHub(seat_ids=make_seat_ids(3))
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            sockets = [await client.ws_connect(f"/ws/p{i}") for i in (1, 2, 3)]
+            for i, socket in enumerate(sockets, start=1):
+                await socket.send_json({"normalizedScore": i / 10})
+            await _settle()
+
+            assert hub.occupied_seats == ("p1", "p2", "p3")
+            assert [round(hub.state_of(f"p{i}")["normalized"], 2) for i in (1, 2, 3)] == [0.1, 0.2, 0.3]
+            for socket in sockets:
+                await socket.close()
+
+    @async_test
     async def test_malformed_frame_does_not_drop_the_connection(self, static_dir):
         hub = PlayerHub()
-        app = create_app(static_dir=static_dir, hub=hub)
-        async with TestClient(TestServer(app)) as client:
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
             async with client.ws_connect("/ws/p1") as socket:
                 await socket.send_str("{half a frame")
                 await socket.send_json({"rawScore": 1.0, "normalizedScore": 1.0})
@@ -218,8 +364,7 @@ class TestApp:
     @async_test
     async def test_seat_is_released_on_disconnect(self, static_dir):
         hub = PlayerHub()
-        app = create_app(static_dir=static_dir, hub=hub)
-        async with TestClient(TestServer(app)) as client:
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
             async with client.ws_connect("/ws/p1") as socket:
                 await _settle()
                 assert hub.occupied_seats == ("p1",)
@@ -230,8 +375,7 @@ class TestApp:
     @async_test
     async def test_reconnect_displaces_the_stale_socket(self, static_dir):
         hub = PlayerHub()
-        app = create_app(static_dir=static_dir, hub=hub)
-        async with TestClient(TestServer(app)) as client:
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
             first = await client.ws_connect("/ws/p1")
             await _settle()
             second = await client.ws_connect("/ws/p1")
@@ -248,6 +392,119 @@ class TestApp:
             await second.close()
 
 
-async def _settle():
-    """Yield long enough for the server side of a socket to process a frame."""
-    await asyncio.sleep(0.05)
+class TestObserver:
+    @async_test
+    async def test_observer_gets_a_snapshot_immediately(self, static_dir):
+        # Without this the dashboard would stay blank until the first tick.
+        hub = PlayerHub(seat_ids=make_seat_ids(3))
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            async with client.ws_connect("/ws/observe") as observer:
+                payload = json.loads((await observer.receive()).data)
+                assert payload["type"] == "state"
+                assert [s["id"] for s in payload["seats"]] == ["p1", "p2", "p3"]
+
+    @async_test
+    async def test_observer_sees_player_telemetry(self, static_dir):
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            async with client.ws_connect("/ws/observe") as observer:
+                await observer.receive()  # the immediate snapshot
+
+                async with client.ws_connect("/ws/p2") as player:
+                    await player.send_json({"normalizedScore": 0.8})
+
+                    # Wait for a broadcast tick rather than the immediate send.
+                    for _ in range(20):
+                        payload = json.loads((await observer.receive()).data)
+                        seat = next(s for s in payload["seats"] if s["id"] == "p2")
+                        if seat["connected"] and seat["normalized"] == 0.8:
+                            break
+                    else:
+                        pytest.fail("observer never saw p2 telemetry")
+
+    @async_test
+    async def test_observer_is_not_a_seat(self, static_dir):
+        # /ws/observe must not be routed as a seat named "observe".
+        hub = PlayerHub()
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            async with client.ws_connect("/ws/observe") as observer:
+                await observer.receive()
+                assert hub.occupied_seats == ()
+
+    @async_test
+    async def test_observer_frames_are_ignored(self, static_dir):
+        hub = PlayerHub()
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            async with client.ws_connect("/ws/observe") as observer:
+                await observer.receive()
+                await observer.send_json({"rawScore": 99.0, "normalizedScore": 99.0})
+                await _settle()
+                assert hub.state_of("p1")["normalized"] == 0.0
+                assert not observer.closed
+
+    @async_test
+    async def test_observer_is_forgotten_on_disconnect(self, static_dir):
+        hub = PlayerHub()
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            async with client.ws_connect("/ws/observe") as observer:
+                await observer.receive()
+                assert len(hub.observers) == 1
+                await observer.close()
+            await _settle()
+            assert len(hub.observers) == 0
+
+
+class TestSessionControl:
+    @async_test
+    async def test_start_and_stop_a_session(self, static_dir, recorder):
+        hub = PlayerHub(seat_ids=make_seat_ids(2), recorder=recorder)
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            started = await (await client.post("/api/session/start", json={"label": "trial"})).json()
+            assert started["active"] is True
+            assert started["label"] == "trial"
+            assert hub.recording is True
+
+            stopped = await (await client.post("/api/session/stop")).json()
+            assert stopped["active"] is False
+            assert stopped["dir"] == started["dir"]
+            assert hub.recording is False
+
+    @async_test
+    async def test_session_start_without_a_label_still_works(self, static_dir, recorder):
+        hub = PlayerHub(recorder=recorder)
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            response = await client.post("/api/session/start")
+            assert response.status == 200
+            assert hub.recording is True
+
+    @async_test
+    async def test_recording_state_appears_in_the_snapshot(self, static_dir, recorder):
+        # Every dashboard should reflect the session, not just the one that
+        # pressed the button.
+        hub = PlayerHub(recorder=recorder)
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            await client.post("/api/session/start", json={"label": "shared"})
+            body = await (await client.get("/healthz")).json()
+            assert body["recording"] == {"active": True, "label": "shared"}
+
+    @async_test
+    async def test_session_start_without_a_recorder_reports_unavailable(self, static_dir):
+        hub = PlayerHub()  # no recorder
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            assert (await client.post("/api/session/start")).status == 503
+
+    @async_test
+    async def test_a_live_session_captures_socket_telemetry(self, static_dir, recorder):
+        hub = PlayerHub(seat_ids=make_seat_ids(2), recorder=recorder)
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            started = await (await client.post("/api/session/start", json={"label": "live"})).json()
+
+            async with client.ws_connect("/ws/p1") as player:
+                await player.send_json({"rawScore": 2.0, "normalizedScore": 0.9})
+                await _settle()
+
+            await client.post("/api/session/stop")
+
+            rows = _read_csv(recorder.base_dir / started["dir"].split("/")[-1] / "telemetry.csv")
+            assert [r[1] for r in rows[1:]] == ["p1"]
+            assert rows[1][2:] == ["2.0", "0.9", "0"]

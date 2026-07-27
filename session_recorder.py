@@ -17,11 +17,20 @@ from pathlib import Path
 
 class SessionRecorder:
     # OSC address -> (filename, fixed data columns excluding the leading `t`).
+    #
+    # The /pwa/ entries are not real OSC addresses. They carry telemetry from
+    # the browser clients, which send already-computed scores rather than raw
+    # EEG, and the prefix keeps them honestly distinct from anything a headset
+    # actually emits.
     FIXED = {
         "/muse/eeg":  ("eeg.csv",  ["TP9", "AF7", "AF8", "TP10"]),
         "/muse/gyro": ("gyro.csv", ["x", "y", "z"]),
         "/muse/acc":  ("acc.csv",  ["x", "y", "z"]),
         "/muse/ppg":  ("ppg.csv",  ["ppg1", "ppg2", "ppg3"]),
+
+        "/pwa/telemetry":   ("telemetry.csv",   ["seat", "raw", "normalized", "calibrating"]),
+        "/pwa/calibration": ("calibration.csv", ["seat", "baseline", "half_range"]),
+        "/pwa/seat":        ("seats.csv",       ["seat", "event"]),
     }
 
     def __init__(self, base_dir="recordings", now_fn=None, clock_fn=None):
