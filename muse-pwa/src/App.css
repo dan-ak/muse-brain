@@ -1,0 +1,151 @@
+/* Custom styles for the app layout components */
+.app-container {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 24px;
+  margin-top: 24px;
+}
+
+@media (min-width: 768px) {
+  .dashboard-grid {
+    grid-template-columns: 1fr 2fr;
+  }
+}
+
+.metric-card {
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+.metric-value {
+  font-size: 2.2rem;
+  font-weight: 800;
+  margin: 8px 0;
+  font-feature-settings: "tnum";
+}
+
+.card-title {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin: 0;
+}
+
+/* EEG wave visualizer panel */
+.wave-visualizer {
+  height: 220px;
+  background: rgba(0,0,0,0.25);
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--card-border);
+  margin-top: 12px;
+}
+
+/* Circular Meditation Dial */
+.dial-container {
+  position: relative;
+  width: 180px;
+  height: 180px;
+  margin: 0 auto;
+}
+
+.dial-value {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+}
+
+.dial-score {
+  font-size: 2.5rem;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.dial-label {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 4px;
+}
+
+/* Status Indicator Dot */
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 8px;
+}
+
+.status-dot.active {
+  background-color: var(--success);
+  box-shadow: 0 0 10px var(--success-glow);
+}
+
+.status-dot.inactive {
+  background-color: var(--danger);
+  box-shadow: 0 0 10px var(--danger-glow);
+}
+
+.status-dot.warning {
+  background-color: var(--warning);
+  box-shadow: 0 0 10px rgba(245, 158, 11, 0.5);
+}
+
+.band-bars-container {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.band-bar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.band-bar-label {
+  width: 60px;
+  font-weight: bold;
+  font-size: 0.85rem;
+  text-transform: capitalize;
+}
+
+.band-bar-outer {
+  flex-grow: 1;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.band-bar-inner {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 5px;
+  transition: width 0.1s ease-out;
+}
+
+.band-bar-value {
+  width: 50px;
+  text-align: right;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
