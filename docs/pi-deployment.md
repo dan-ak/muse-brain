@@ -50,7 +50,14 @@ cd muse-pwa && npm ci && npm run build
 
 ### 3. Issue the certificate
 
-Needs internet, so do this at home.
+Needs internet, so do this at home — but **run it on the Pi**, not on a laptop.
+
+acme.sh registers a renewal cron on whichever machine issues the certificate,
+and renewals rewrite the files there. Issue on the Pi and renewal, file
+installation, and the service reload all happen in one place. Issuing on a
+laptop works and is a perfectly good test of the Cloudflare credentials, but it
+leaves the Pi holding a copy that quietly goes stale after 90 days while the
+laptop dutifully renews a certificate nothing uses.
 
 **Create a scoped Cloudflare API token.** In the Cloudflare dashboard, go to
 **My Profile → API Tokens → Create Token → Create Custom Token**:
@@ -76,11 +83,18 @@ sudo -E ./scripts/issue-cert.sh
 ```
 
 The `-E` matters: `sudo` strips the environment by default, and without it the
-script cannot see the credentials.
+script cannot see the credentials. It also preserves `HOME`, so acme.sh installs
+itself under the invoking user's home directory owned by root, and registers its
+renewal cron as root. That is untidy but harmless.
 
 acme.sh creates a `_acme-challenge.brain.a-ibk.com` TXT record, waits for Let's
 Encrypt to read it, then removes it. You do not need to touch DNS by hand for
 issuance, and nothing needs to point at the Pi yet.
+
+Create the `muse` service user (step 2) *before* issuing, so the script can make
+the private key readable by the group the service runs as. If the user does not
+exist yet the key is left `0600 root:root` and the service will fail to start
+with a permission error; re-running the script after creating the user fixes it.
 
 ### 4. Make the name resolve on the router
 

@@ -38,7 +38,11 @@ set -euo pipefail
 TLS_DIR="${MUSE_TLS_DIR:-/etc/muse-brain/tls}"
 ACME_HOME="${ACME_HOME:-$HOME/.acme.sh}"
 ACME="$ACME_HOME/acme.sh"
-RELOAD_CMD="${MUSE_RELOAD_CMD:-systemctl restart muse-brain}"
+# The reload has to tolerate the unit being absent. On a first install the
+# service does not exist yet, and when issuing from a laptop for a Pi it never
+# will. Neither is a reason to fail the issue, and acme.sh stores this command
+# for every future renewal, so an intolerant one would break renewals too.
+RELOAD_CMD="${MUSE_RELOAD_CMD:-systemctl restart muse-brain 2>/dev/null || true}"
 
 fail() {
   echo "error: $*" >&2
@@ -69,29 +73,55 @@ mkdir -p "$TLS_DIR"
 
 # install-cert is what registers the renewal hook, so the reload command runs
 # automatically on every future renewal. Never copy the files by hand.
-"$ACME" --install-cert -d "$MUSE_DOMAIN" \
+#
+# acme.sh exits non-zero when the reload hook fails even though the certificate
+# installed perfectly well, so judge success by whether the files landed rather
+# than by the exit status. Letting set -e abort here would skip the permission
+# fixes below and leave a key the service cannot read.
+if ! "$ACME" --install-cert -d "$MUSE_DOMAIN" \
   --fullchain-file "$TLS_DIR/fullchain.pem" \
   --key-file "$TLS_DIR/privkey.pem" \
-  --reloadcmd "$RELOAD_CMD"
+  --reloadcmd "$RELOAD_CMD"; then
+  echo "note: acme.sh reported an error (usually the reload hook). Checking the files." >&2
+fi
 
-chmod 640 "$TLS_DIR/privkey.pem"
+for f in fullchain.pem privkey.pem; do
+  [ -s "$TLS_DIR/$f" ] || fail "$TLS_DIR/$f was not written"
+done
+
+chmod 644 "$TLS_DIR/fullchain.pem"
+
 if id -u muse >/dev/null 2>&1; then
   chown root:muse "$TLS_DIR/privkey.pem" "$TLS_DIR/fullchain.pem"
+  chmod 640 "$TLS_DIR/privkey.pem"
+  key_note="readable by the muse service user"
+else
+  # No service user here, so keep the key as tight as possible rather than
+  # opening it up for a group that does not exist.
+  chmod 600 "$TLS_DIR/privkey.pem"
+  key_note="root-only -- there is no 'muse' user on this machine yet"
 fi
 
 echo
-echo "Certificate installed in $TLS_DIR"
+echo "Certificate installed in $TLS_DIR (key $key_note)"
 openssl x509 -in "$TLS_DIR/fullchain.pem" -noout -subject -dates
 
 cat <<'REMINDER'
 
-Two things this script cannot do for you:
+Three things this script cannot do for you:
 
-  1. Point DNS at the Pi. The certificate proves you own the name; it does not
+  1. Put the certificate where it will be used. acme.sh registered its renewal
+     cron on THIS machine, and renewals will rewrite the files here. Run this
+     script on the Pi for the production certificate, so renewal and reload
+     happen where the service actually runs. Issuing on a laptop is a fine test
+     of the credentials, but it leaves the Pi with a certificate that silently
+     goes stale.
+
+  2. Point DNS at the Pi. The certificate proves you own the name; it does not
      make the name resolve. Add the record on the GL.iNet router so it resolves
      with no uplink -- a public A record is useless once you are off-grid.
 
-  2. Renew on the playa. This certificate is good for 90 days and renewal needs
+  3. Renew on the playa. This certificate is good for 90 days and renewal needs
      internet. Re-run this script shortly before you leave and confirm with
      scripts/preflight.sh that you have comfortable margin.
 REMINDER
