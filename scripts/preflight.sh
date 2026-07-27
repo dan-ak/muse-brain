@@ -7,7 +7,7 @@
 # "the pair button does nothing" -- but has a completely different cause.
 #
 # Usage:
-#   MUSE_DOMAIN=brain.example.com ./scripts/preflight.sh
+#   MUSE_DOMAIN=brain.a-ibk.com ./scripts/preflight.sh
 
 set -uo pipefail
 

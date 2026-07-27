@@ -21,9 +21,14 @@ built on.
 
 ### 1. Pick a hostname
 
-Use a subdomain of a domain you already own, e.g. `brain.example.com`. It never
-needs to be publicly reachable; you only need control of its DNS records so
-Let's Encrypt can verify ownership.
+Use a subdomain of a domain you already own — this project uses
+`brain.a-ibk.com`. It never needs to be publicly reachable, and nothing is ever
+served on the apex domain. All you need is control of the DNS records, so
+Let's Encrypt can verify ownership by watching a TXT record appear.
+
+A repurposed domain is fine. The certificate says nothing about what the domain
+was previously for, and a subdomain keeps this separate from anything else the
+zone is doing.
 
 ### 2. Install the code
 
@@ -47,30 +52,59 @@ cd muse-pwa && npm ci && npm run build
 
 Needs internet, so do this at home.
 
+**Create a scoped Cloudflare API token.** In the Cloudflare dashboard, go to
+**My Profile → API Tokens → Create Token → Create Custom Token**:
+
+- Permissions: **Zone → DNS → Edit**
+- Zone Resources: **Include → Specific zone → a-ibk.com**
+
+Scope it to the one zone rather than all zones, and use a token rather than the
+Global API Key — a leaked Global API Key hands over the entire Cloudflare
+account, while this token can only edit DNS records in this one zone.
+
+**Grab the Zone ID** from the `a-ibk.com` overview page in Cloudflare, in the
+right-hand sidebar under "API". Supplying the Zone ID directly means the token
+never needs permission to list your zones.
+
 ```bash
-export MUSE_DOMAIN=brain.example.com
-export MUSE_ACME_EMAIL=you@example.com
-export MUSE_DNS_PROVIDER=dns_cf        # see acme.sh dnsapi docs for others
-export CF_Token=...
-export CF_Account_ID=...
+export MUSE_DOMAIN=brain.a-ibk.com
+export MUSE_ACME_EMAIL=dan.acostakane@gmail.com
+export MUSE_DNS_PROVIDER=dns_cf
+export CF_Token=...        # the token you just created
+export CF_Zone_ID=...      # from the a-ibk.com overview page
 sudo -E ./scripts/issue-cert.sh
 ```
+
+The `-E` matters: `sudo` strips the environment by default, and without it the
+script cannot see the credentials.
+
+acme.sh creates a `_acme-challenge.brain.a-ibk.com` TXT record, waits for Let's
+Encrypt to read it, then removes it. You do not need to touch DNS by hand for
+issuance, and nothing needs to point at the Pi yet.
 
 ### 4. Make the name resolve on the router
 
 This is the step that is easy to skip at home and fatal on the playa.
 
-With no uplink, phones cannot reach public DNS, so a public A record does
-nothing. The GL.iNet router has to answer for the name itself. Add to its
-dnsmasq configuration:
+With no uplink, phones cannot reach public DNS, so a Cloudflare record does
+nothing out there. The GL.iNet router has to answer for the name itself. Add to
+its dnsmasq configuration (LuCI → Network → DHCP and DNS, or
+`/etc/dnsmasq.conf`):
 
 ```
-address=/brain.example.com/192.168.8.2
+address=/brain.a-ibk.com/192.168.8.2
 ```
 
 using whatever address the Pi actually holds — give it a DHCP reservation so it
-does not move. Setting the same record in public DNS as well is worth doing: it
-makes the identical URL work on your home network while testing.
+does not move.
+
+**Optionally**, also add an A record in Cloudflare for `brain` pointing at the
+Pi's LAN address, with the proxy **off** (grey cloud, "DNS only"). An orange
+cloud cannot work here: Cloudflare would try to proxy public traffic to a
+private address. This record is purely a convenience so the same URL works on
+your home network before you leave. If Cloudflare objects to a private address,
+skip it — the router entry is the one that matters, and it is what will be
+serving the name at Burning Man anyway.
 
 ### 5. Install the service
 
@@ -81,12 +115,12 @@ sudo systemctl enable --now muse-brain
 ```
 
 The unit binds port 443 as a non-root user through `CAP_NET_BIND_SERVICE`, so
-phones open a bare `https://brain.example.com` with no port number.
+phones open a bare `https://brain.a-ibk.com` with no port number.
 
 ## Checking it
 
 ```bash
-MUSE_DOMAIN=brain.example.com ./scripts/preflight.sh
+MUSE_DOMAIN=brain.a-ibk.com ./scripts/preflight.sh
 ```
 
 This checks certificate expiry, that the certificate actually covers the
@@ -100,10 +134,17 @@ The certificate lasts 90 days and **renewal requires internet**. Reissue it
 shortly before departure and confirm the margin:
 
 ```bash
-MUSE_DOMAIN=brain.example.com ./scripts/preflight.sh
+MUSE_DOMAIN=brain.a-ibk.com ./scripts/preflight.sh
 ```
 
 Aim for well over 30 days remaining at departure.
+
+**Check that `a-ibk.com` itself does not lapse.** It was registered for a
+project that has since been scrapped, so it is exactly the kind of domain that
+quietly hits its renewal date. If it expires you cannot issue or renew a
+certificate at all. An already-issued certificate keeps working — certificates
+are not revalidated against registration — so an expiry mid-event is survivable,
+but one shortly before departure is not.
 
 One related trap: phones validate certificate dates against their own clock. A
 phone that has been offline for a week, or that boots with a flat battery and a

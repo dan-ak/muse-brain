@@ -9,21 +9,29 @@
 # Needs internet. Run it at home, not on the playa.
 #
 # Required:
-#   MUSE_DOMAIN         hostname the phones will open, e.g. brain.example.com
+#   MUSE_DOMAIN         hostname the phones will open, e.g. brain.a-ibk.com
 #   MUSE_ACME_EMAIL     address for Let's Encrypt expiry notices
 #   MUSE_DNS_PROVIDER   acme.sh DNS hook, e.g. dns_cf for Cloudflare
 #
 # Plus whatever credentials that hook needs, exported into this environment.
-# For Cloudflare that is CF_Token and CF_Account_ID. Other providers are listed
-# at https://github.com/acmesh-official/acme.sh/wiki/dnsapi
+# For Cloudflare that is CF_Token plus either CF_Zone_ID (single domain) or
+# CF_Account_ID. Other providers are listed at
+# https://github.com/acmesh-official/acme.sh/wiki/dnsapi
+#
+# The Cloudflare token needs only Zone > DNS > Edit, scoped to the one zone.
+# Do not use the Global API Key: leaking it compromises the whole account,
+# whereas this token can only touch DNS records in that single zone.
 #
 # Example:
-#   export MUSE_DOMAIN=brain.example.com
-#   export MUSE_ACME_EMAIL=you@example.com
+#   export MUSE_DOMAIN=brain.a-ibk.com
+#   export MUSE_ACME_EMAIL=dan.acostakane@gmail.com
 #   export MUSE_DNS_PROVIDER=dns_cf
-#   export CF_Token=...
-#   export CF_Account_ID=...
+#   export CF_Token=...      # Zone > DNS > Edit, scoped to a-ibk.com
+#   export CF_Zone_ID=...    # from the zone overview page, right sidebar
 #   sudo -E ./scripts/issue-cert.sh
+#
+# Note the -E: sudo strips the environment by default, so without it the
+# credentials above never reach acme.sh.
 
 set -euo pipefail
 
