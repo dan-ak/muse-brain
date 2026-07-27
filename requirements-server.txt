@@ -1,0 +1,5 @@
+# Everything server.py needs, and nothing else.
+#
+# Kept separate so the Pi does not build PyQt5, scipy, and trimesh just to serve
+# a static bundle and a websocket. The DSP runs in the browser on this path.
+aiohttp>=3.9
