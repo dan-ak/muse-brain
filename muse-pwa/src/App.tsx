@@ -9,18 +9,12 @@ import {
   powerByBand,
   BandPowers
 } from './utils/dsp';
+import { fetchSeats, playerSocketUrl } from './serverApi';
 import './App.css';
 
 // Channel labels for Muse 2
 const CHANNEL_LABELS = ['TP9 (Left Ear)', 'AF7 (Left Forehead)', 'AF8 (Right Forehead)', 'TP10 (Right Ear)'];
 const CHANNEL_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ec4899']; // Blue, Green, Yellow, Pink
-
-// The page and the socket share an origin, so the host is never configured by
-// hand: whatever served this build also terminates the websocket.
-const socketUrlFor = (player: string) => {
-  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-  return `${scheme}://${window.location.host}/ws/${player}`;
-};
 
 // Web Bluetooth only exists in a secure context. Served over plain HTTP from a
 // LAN address, navigator.bluetooth is simply undefined — so check up front and
@@ -34,8 +28,10 @@ function App() {
   const [isMock, setIsMock] = useState(false);
   const [battery, setBattery] = useState<number | null>(null);
   
-  // WebSocket State
-  const [playerId, setPlayerId] = useState<'p1' | 'p2'>('p1');
+  // WebSocket State. The roster is owned by the server, so adding a seat is a
+  // server flag rather than a rebuild of this bundle.
+  const [seats, setSeats] = useState<string[]>([]);
+  const [playerId, setPlayerId] = useState<string>('p1');
   const [wsStatus, setWsStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   
   // DSP & Live EEG Stats
@@ -65,6 +61,23 @@ function App() {
   // Canvas Reference
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  // 0. Learn which seats this server offers.
+  useEffect(() => {
+    let cancelled = false;
+    fetchSeats()
+      .then((available) => {
+        if (cancelled || available.length === 0) return;
+        setSeats(available);
+        // Only correct the selection if the current one is not on offer,
+        // so a deliberate choice survives a refetch.
+        setPlayerId((current) => (available.includes(current) ? current : available[0]));
+      })
+      .catch((err) => console.error('Could not fetch the seat roster:', err));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // 1. Maintain WebSocket Connection
   useEffect(() => {
     let reconnectTimeout: number;
@@ -75,7 +88,7 @@ function App() {
       }
 
       setWsStatus('connecting');
-      const wsUrl = socketUrlFor(playerId);
+      const wsUrl = playerSocketUrl(playerId);
       console.log(`Connecting to WebSocket: ${wsUrl}`);
       
       const socket = new WebSocket(wsUrl);
@@ -559,13 +572,17 @@ function App() {
                 <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Player Seat</label>
                 <select
                   value={playerId}
-                  onChange={(e) => setPlayerId(e.target.value as 'p1' | 'p2')}
+                  onChange={(e) => setPlayerId(e.target.value)}
+                  disabled={seats.length === 0}
                 >
-                  <option value="p1">Player 1 (Left)</option>
-                  <option value="p2">Player 2 (Right)</option>
+                  {(seats.length > 0 ? seats : [playerId]).map((seat) => (
+                    <option key={seat} value={seat}>
+                      {seat.toUpperCase()}
+                    </option>
+                  ))}
                 </select>
                 <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '6px' }}>
-                  Streaming to {socketUrlFor(playerId)}
+                  Streaming to {playerSocketUrl(playerId)}
                 </span>
               </div>
 
