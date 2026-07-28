@@ -14,6 +14,12 @@ Environment=MUSE_HOST=0.0.0.0
 Environment=MUSE_PORT=443
 Environment=MUSE_TLS_CERT=/etc/muse-brain/tls/fullchain.pem
 Environment=MUSE_TLS_KEY=/etc/muse-brain/tls/privkey.pem
+Environment=MUSE_RECORDINGS_DIR=/var/lib/muse-brain/recordings
+
+# ProtectSystem=strict makes the whole filesystem read-only, so recordings need
+# an explicitly writable home. StateDirectory creates /var/lib/muse-brain owned
+# by the service user and keeps it writable under that hardening.
+StateDirectory=muse-brain
 
 ExecStart=/opt/muse-brain/.venv/bin/python /opt/muse-brain/server.py
 
