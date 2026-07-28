@@ -1,9 +1,14 @@
 /* Operator view. Sized to be read across a tent, not held in a hand. */
 
+/* width and box-sizing are load-bearing, matching .app-container: #root is a
+   column flexbox, and an auto cross-axis margin suppresses align-items:stretch,
+   so without an explicit width this shrinks to fit its content. */
 .dash-container {
   max-width: 1600px;
   margin: 0 auto;
   padding: 24px;
+  width: 100%;
+  box-sizing: border-box;
 }
 
 .dash-header {
@@ -166,7 +171,9 @@
   height: 16px;
   border-radius: 50%;
   transform: translate(-50%, -50%);
-  transition: left 0.12s linear, background 0.3s;
+  /* Matched to the 10 Hz broadcast interval: the marker arrives exactly as the
+     next value lands, so motion is smooth without the dot lagging the number. */
+  transition: left 0.1s linear, background 0.3s;
 }
 
 .drive-legend {
