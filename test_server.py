@@ -186,6 +186,28 @@ class TestPlayerHub:
         hub.handle_message("p1", json.dumps({"normalizedScore": 0.6}))
         assert hub.is_stale("p1") is False
 
+    def test_a_seat_repeating_one_value_goes_stale(self):
+        # Observed live: a tab whose headset had dropped kept streaming its last
+        # score at 30 Hz. Frames were arriving, so a receive-based check called
+        # it live while the dashboard showed a number frozen for minutes.
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        hub.attach("p1", object())
+        frozen = json.dumps({"rawScore": 1.0, "normalizedScore": -0.1294941623381023})
+
+        hub.handle_message("p1", frozen)
+        assert hub.is_stale("p1") is False
+
+        for _ in range(200):
+            now[0] += 0.05
+            hub.handle_message("p1", frozen)
+
+        assert hub.is_stale("p1") is True, "identical readings are not liveness"
+
+        # A genuinely new reading revives it.
+        hub.handle_message("p1", json.dumps({"rawScore": 1.0, "normalizedScore": -0.13}))
+        assert hub.is_stale("p1") is False
+
     def test_a_seat_that_never_sends_goes_stale(self):
         now = [0.0]
         hub = PlayerHub(clock=lambda: now[0])

@@ -150,8 +150,14 @@ class PlayerHub:
         except (TypeError, ValueError):
             return IGNORED
 
+        # Only a *changed* reading counts as liveness. A client whose headset
+        # dropped keeps streaming its last computed score at 30 Hz, so frames
+        # arriving is not evidence of a live headset — the value moving is.
+        # Real EEG-derived scores never repeat bit-for-bit, so an identical
+        # reading means the source is frozen.
+        if state != self._states[seat_id]:
+            self._last_seen[seat_id] = self._clock()
         self._states[seat_id] = state
-        self._last_seen[seat_id] = self._clock()
         self._record(
             ADDR_TELEMETRY,
             [seat_id, state["raw"], state["normalized"], int(state["calibrating"])],
