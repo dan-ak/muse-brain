@@ -1,3 +1,7 @@
+# Full development stack: the Qt visualizer, the OSC path, and the PWA host.
+# The Pi only needs requirements-server.txt.
+-r requirements-server.txt
+
 python-osc>=1.8
 pyqtgraph>=0.13
 numpy>=1.26

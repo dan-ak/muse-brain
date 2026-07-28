@@ -15,6 +15,18 @@ import './App.css';
 const CHANNEL_LABELS = ['TP9 (Left Ear)', 'AF7 (Left Forehead)', 'AF8 (Right Forehead)', 'TP10 (Right Ear)'];
 const CHANNEL_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ec4899']; // Blue, Green, Yellow, Pink
 
+// The page and the socket share an origin, so the host is never configured by
+// hand: whatever served this build also terminates the websocket.
+const socketUrlFor = (player: string) => {
+  const scheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+  return `${scheme}://${window.location.host}/ws/${player}`;
+};
+
+// Web Bluetooth only exists in a secure context. Served over plain HTTP from a
+// LAN address, navigator.bluetooth is simply undefined — so check up front and
+// explain it, rather than letting the pair button throw something cryptic.
+const bluetoothAvailable = window.isSecureContext && 'bluetooth' in navigator;
+
 function App() {
   // Device & Connection State
   const [museDevice, setMuseDevice] = useState<Muse | null>(null);
@@ -23,10 +35,6 @@ function App() {
   const [battery, setBattery] = useState<number | null>(null);
   
   // WebSocket State
-  const [hostIp, setHostIp] = useState(() => {
-    return window.location.hostname || '192.168.1.100';
-  });
-  const [port, setPort] = useState('3000');
   const [playerId, setPlayerId] = useState<'p1' | 'p2'>('p1');
   const [wsStatus, setWsStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   
@@ -67,7 +75,7 @@ function App() {
       }
 
       setWsStatus('connecting');
-      const wsUrl = `ws://${hostIp}:${port}/ws/${playerId}`;
+      const wsUrl = socketUrlFor(playerId);
       console.log(`Connecting to WebSocket: ${wsUrl}`);
       
       const socket = new WebSocket(wsUrl);
@@ -97,7 +105,7 @@ function App() {
       }
       clearTimeout(reconnectTimeout);
     };
-  }, [hostIp, port, playerId]);
+  }, [playerId]);
 
   // 2. Headset Data Loop (draining the MuseCircularBuffer)
   useEffect(() => {
@@ -342,6 +350,7 @@ function App() {
 
   // 4. Connection Handlers
   const handleConnectReal = async () => {
+    if (!bluetoothAvailable) return;
     try {
       setIsMock(false);
       // Instantiate and connect real web bluetooth device
@@ -515,44 +524,64 @@ function App() {
           
           {/* Connection Manager */}
           <section className="glass-card metric-card">
-            <h3 className="card-title">1. Device & Network Config</h3>
-            
-            <div className="flex flex-col gap-4" style={{ marginTop: '16px' }}>
-              <div className="flex flex-col">
-                <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Raspberry Pi IP Address</label>
-                <input 
-                  type="text" 
-                  value={hostIp} 
-                  onChange={(e) => setHostIp(e.target.value)} 
-                  placeholder="e.g. 192.168.1.100" 
-                />
-              </div>
+            <h3 className="card-title">1. Device & Seat</h3>
 
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
-                <div className="flex flex-col">
-                  <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Server Port</label>
-                  <input 
-                    type="number" 
-                    value={port} 
-                    onChange={(e) => setPort(e.target.value)} 
-                    placeholder="3000" 
-                  />
+            <div className="flex flex-col gap-4" style={{ marginTop: '16px' }}>
+              {!bluetoothAvailable && (
+                <div style={{
+                  background: 'rgba(239, 68, 68, 0.08)',
+                  border: '1px solid var(--danger)',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  fontSize: '0.8rem',
+                  lineHeight: 1.5
+                }}>
+                  <strong style={{ color: 'var(--danger)', display: 'block', marginBottom: '4px' }}>
+                    Web Bluetooth unavailable
+                  </strong>
+                  {!window.isSecureContext ? (
+                    <>
+                      This page was loaded over an insecure connection
+                      (<code>{window.location.protocol}//{window.location.host}</code>).
+                      Browsers only expose Bluetooth on HTTPS or localhost. Open the
+                      site over <code>https://</code> to pair a headset.
+                    </>
+                  ) : (
+                    <>
+                      This browser has no Web Bluetooth support. On Android use Chrome;
+                      iOS Safari cannot pair a Muse at all.
+                    </>
+                  )}
                 </div>
-                <div className="flex flex-col">
-                  <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Player Seat</label>
-                  <select 
-                    value={playerId} 
-                    onChange={(e) => setPlayerId(e.target.value as 'p1' | 'p2')}
-                  >
-                    <option value="p1">Player 1 (Left)</option>
-                    <option value="p2">Player 2 (Right)</option>
-                  </select>
-                </div>
+              )}
+
+              <div className="flex flex-col">
+                <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Player Seat</label>
+                <select
+                  value={playerId}
+                  onChange={(e) => setPlayerId(e.target.value as 'p1' | 'p2')}
+                >
+                  <option value="p1">Player 1 (Left)</option>
+                  <option value="p2">Player 2 (Right)</option>
+                </select>
+                <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)', marginTop: '6px' }}>
+                  Streaming to {socketUrlFor(playerId)}
+                </span>
               </div>
 
               {!isConnected ? (
                 <div className="flex flex-col gap-2" style={{ marginTop: '8px' }}>
-                  <button onClick={handleConnectReal} className="glow-blue" style={{ background: 'var(--primary)', borderColor: 'rgba(59, 130, 246, 0.4)' }}>
+                  <button
+                    onClick={handleConnectReal}
+                    disabled={!bluetoothAvailable}
+                    className="glow-blue"
+                    style={{
+                      background: 'var(--primary)',
+                      borderColor: 'rgba(59, 130, 246, 0.4)',
+                      opacity: bluetoothAvailable ? 1 : 0.4,
+                      cursor: bluetoothAvailable ? 'pointer' : 'not-allowed'
+                    }}
+                  >
                     Pair Muse 2 Headset
                   </button>
                   <button onClick={handleConnectMock} style={{ background: 'rgba(255, 255, 255, 0.05)', fontSize: '0.85rem' }}>
