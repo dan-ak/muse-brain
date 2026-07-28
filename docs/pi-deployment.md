@@ -62,6 +62,11 @@ sudo chown -R muse:muse /opt/muse-brain
 Updating later is the same two rsyncs followed by
 `sudo systemctl restart muse-brain`.
 
+Keep `--delete` on **both** hops. Vite emits content-hashed filenames, so
+without it every deploy leaves the previous bundle behind and `dist/assets`
+grows forever. The `--exclude` patterns protect `.venv` and `recordings` from
+deletion, so this is safe.
+
 ### 3. Issue the certificate
 
 Needs internet, so do this at home — but **run it on the Pi**, not on a laptop.
