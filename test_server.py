@@ -233,6 +233,59 @@ class TestPlayerHub:
         hub.detach("p1", socket)
         assert hub.is_stale("p1") is False
 
+    def test_rate_reflects_the_arrival_interval(self):
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        hub.attach("p1", object())
+        for i in range(60):
+            now[0] += 1 / 30
+            hub.handle_message("p1", json.dumps({"normalizedScore": i / 100}))
+        assert 25 <= hub.rate_of("p1") <= 35
+        assert hub.is_throttled("p1") is False
+
+    def test_a_backgrounded_tab_reads_as_throttled(self):
+        # Browsers clamp timers in hidden tabs to ~1 Hz, so a pocketed phone
+        # keeps streaming and keeps looking connected while its data rate
+        # collapses. Observed live: 59 rows in 58s against another seat's 1422.
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        hub.attach("p1", object())
+        for i in range(10):
+            now[0] += 1.0
+            hub.handle_message("p1", json.dumps({"normalizedScore": i / 100}))
+
+        assert hub.rate_of("p1") < 2.0
+        assert hub.is_throttled("p1") is True
+        # Throttled is not stale: the data is still arriving and still changing.
+        assert hub.is_stale("p1") is False
+
+    def test_an_empty_or_stale_seat_is_not_reported_throttled(self):
+        # Throttled means "connected but slow"; it would be noise on a seat
+        # that is empty or already flagged as silent.
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        assert hub.is_throttled("p1") is False
+
+        hub.attach("p1", object())
+        hub.handle_message("p1", json.dumps({"normalizedScore": 0.5}))
+        now[0] += 30.0
+        assert hub.is_stale("p1") is True
+        assert hub.is_throttled("p1") is False
+
+    def test_snapshot_carries_rate_and_throttle_flags(self):
+        now = [0.0]
+        hub = PlayerHub(seat_ids=make_seat_ids(2), clock=lambda: now[0])
+        hub.attach("p1", object())
+        for i in range(60):
+            now[0] += 1 / 30
+            hub.handle_message("p1", json.dumps({"normalizedScore": i / 100}))
+
+        seats = {s["id"]: s for s in hub.snapshot()["seats"]}
+        assert 25 <= seats["p1"]["rate"] <= 35
+        assert seats["p1"]["throttled"] is False
+        assert seats["p2"]["rate"] == 0.0
+        assert seats["p2"]["throttled"] is False
+
     def test_snapshot_reports_staleness_per_seat(self):
         now = [0.0]
         hub = PlayerHub(seat_ids=make_seat_ids(2), clock=lambda: now[0])
@@ -246,6 +299,9 @@ class TestPlayerHub:
         assert seats["p1"] == {
             "id": "p1", "connected": True, "stale": True,
             "raw": 0.0, "normalized": 0.5, "calibrating": False,
+            # A single arrival gives no interval to measure, and a stale seat
+            # is never also reported as throttled.
+            "rate": 0.0, "throttled": False,
         }
         assert seats["p2"]["stale"] is False
 

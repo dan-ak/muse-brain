@@ -31,12 +31,13 @@ const driveColor = (seat: SeatState) => {
 const statusLabel = (seat: SeatState) => {
   if (!seat.connected) return 'Empty';
   if (seat.stale) return 'No data';
+  if (seat.throttled) return 'Throttled';
   return seat.calibrating ? 'Calibrating' : 'Live';
 };
 
 const statusColor = (seat: SeatState) => {
   if (!seat.connected) return 'var(--text-muted)';
-  if (seat.stale) return 'var(--warning)';
+  if (seat.stale || seat.throttled) return 'var(--warning)';
   return 'var(--success)';
 };
 
@@ -72,6 +73,12 @@ function SeatCard({ seat }: { seat: SeatState }) {
         </div>
       )}
 
+      {seat.throttled && !seat.stale && (
+        <div className="seat-stale-note">
+          only {seat.rate.toFixed(1)} Hz — screen probably locked or tab in background
+        </div>
+      )}
+
       <div className="drive-track">
         <div className="drive-midline" />
         <div
@@ -87,6 +94,11 @@ function SeatCard({ seat }: { seat: SeatState }) {
 
       <div className="seat-raw">
         raw {seat.connected ? seat.raw.toFixed(2) : '--'}
+        {seat.connected && !seat.stale && (
+          <span style={{ float: 'right', color: seat.throttled ? 'var(--warning)' : 'var(--text-muted)' }}>
+            {seat.rate.toFixed(0)} Hz
+          </span>
+        )}
       </div>
     </section>
   );
@@ -155,6 +167,7 @@ export default function Dashboard() {
   // A silent seat is not live, whatever its socket says.
   const liveCount = state.seats.filter((s) => s.connected && !s.stale).length;
   const staleCount = state.seats.filter((s) => s.stale).length;
+  const throttledCount = state.seats.filter((s) => s.throttled && !s.stale).length;
 
   return (
     <div className="dash-container">
@@ -166,6 +179,11 @@ export default function Dashboard() {
             {staleCount > 0 && (
               <span style={{ color: 'var(--warning)' }}>
                 {' '}· {staleCount} silent
+              </span>
+            )}
+            {throttledCount > 0 && (
+              <span style={{ color: 'var(--warning)' }}>
+                {' '}· {throttledCount} throttled
               </span>
             )}
           </span>

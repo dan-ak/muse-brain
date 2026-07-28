@@ -36,6 +36,8 @@ function App() {
   const [seats, setSeats] = useState<string[]>([]);
   const [playerId, setPlayerId] = useState<string>('p1');
   const [seatTaken, setSeatTaken] = useState(false);
+  const [screenHeld, setScreenHeld] = useState(false);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
   // Bumped to deliberately re-enter the seat after another device took it.
   const [reclaimNonce, setReclaimNonce] = useState(0);
   const [wsStatus, setWsStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
@@ -83,6 +85,54 @@ function App() {
       cancelled = true;
     };
   }, []);
+
+  // 0b. Hold the screen awake while a headset is streaming.
+  //
+  // Browsers clamp timers in hidden tabs to about 1 Hz, so the moment a phone
+  // locks or the tab goes to the background this client drops from 30 Hz to
+  // 1 Hz. Nothing errors and the seat still reads connected, so the loss is
+  // invisible until you look at the recording afterwards.
+  useEffect(() => {
+    if (!isConnected || !('wakeLock' in navigator)) return;
+
+    let cancelled = false;
+
+    const acquire = async () => {
+      try {
+        const lock = await navigator.wakeLock.request('screen');
+        if (cancelled) {
+          void lock.release();
+          return;
+        }
+        wakeLockRef.current = lock;
+        setScreenHeld(true);
+        // The browser drops the lock on its own when the page hides, so track
+        // that rather than assuming we still hold it.
+        lock.addEventListener('release', () => setScreenHeld(false));
+      } catch (err) {
+        // Refusal is not fatal — low battery mode declines these. Stream on.
+        console.warn('Screen wake lock refused:', err);
+        setScreenHeld(false);
+      }
+    };
+
+    // A lock cannot be re-acquired while hidden, so retake it on return
+    // instead of requesting once and assuming it survives.
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void acquire();
+    };
+
+    void acquire();
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      void wakeLockRef.current?.release().catch(() => {});
+      wakeLockRef.current = null;
+      setScreenHeld(false);
+    };
+  }, [isConnected]);
 
   // 1. Maintain WebSocket Connection
   useEffect(() => {
@@ -662,9 +712,16 @@ function App() {
                   </button>
                 </div>
               ) : (
-                <button onClick={handleDisconnect} style={{ marginTop: '8px', background: 'rgba(239, 68, 68, 0.1)', borderColor: 'var(--danger)', color: 'var(--danger)' }}>
-                  Disconnect {isMock ? 'Mock' : 'Muse'}
-                </button>
+                <div className="flex flex-col gap-2" style={{ marginTop: '8px' }}>
+                  <button onClick={handleDisconnect} style={{ background: 'rgba(239, 68, 68, 0.1)', borderColor: 'var(--danger)', color: 'var(--danger)' }}>
+                    Disconnect {isMock ? 'Mock' : 'Muse'}
+                  </button>
+                  <span style={{ fontSize: '0.7rem', color: screenHeld ? 'var(--success)' : 'var(--warning)', lineHeight: 1.4 }}>
+                    {screenHeld
+                      ? '🔆 Screen kept awake — streaming at full rate'
+                      : '⚠️ Screen not held. If it locks, streaming drops to ~1 Hz.'}
+                  </span>
+                </div>
               )}
             </div>
           </section>

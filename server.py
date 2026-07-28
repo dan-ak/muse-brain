@@ -21,6 +21,7 @@ import logging
 import os
 import ssl
 import time
+from collections import deque
 from pathlib import Path
 
 from aiohttp import WSCloseCode, WSMsgType, web
@@ -41,6 +42,14 @@ OBSERVER_HZ = 10
 # dashboard stops calling it live. Clients stream at 30 Hz, so this is a very
 # wide margin — it only trips when data has genuinely stopped.
 STALE_AFTER_S = 3.0
+
+# Window over which each seat's arrival rate is measured.
+RATE_WINDOW_S = 2.0
+
+# Browsers throttle timers in hidden tabs to roughly 1 Hz, so a phone that
+# locks its screen silently drops from 30 Hz to 1 Hz while still looking
+# connected. Anything this slow is reported as throttled rather than healthy.
+THROTTLED_BELOW_HZ = 5.0
 
 HUB = web.AppKey("hub")
 STATIC_DIR = web.AppKey("static_dir", Path)
@@ -82,9 +91,10 @@ class PlayerHub:
         self._observers = set()
         self._recorder = recorder
         self._label = ""
-        # Injectable so staleness is testable without waiting in real time.
+        # Injectable so staleness and rate are testable without waiting in real time.
         self._clock = clock or time.monotonic
         self._last_seen = {sid: None for sid in self.seat_ids}
+        self._arrivals = {sid: deque() for sid in self.seat_ids}
 
     # -- seats ---------------------------------------------------------------
 
@@ -158,6 +168,7 @@ class PlayerHub:
         if state != self._states[seat_id]:
             self._last_seen[seat_id] = self._clock()
         self._states[seat_id] = state
+        self._note_arrival(seat_id)
         self._record(
             ADDR_TELEMETRY,
             [seat_id, state["raw"], state["normalized"], int(state["calibrating"])],
@@ -216,6 +227,40 @@ class PlayerHub:
 
     # -- snapshot ------------------------------------------------------------
 
+    def _note_arrival(self, seat_id):
+        now = self._clock()
+        arrivals = self._arrivals[seat_id]
+        arrivals.append(now)
+        cutoff = now - RATE_WINDOW_S
+        while arrivals and arrivals[0] < cutoff:
+            arrivals.popleft()
+
+    def rate_of(self, seat_id):
+        """Frames per second over the recent window.
+
+        Measured from arrival timestamps rather than counted per wall-clock
+        second, so it reflects the rate right now instead of averaging across a
+        transition — a phone that just locked its screen should read ~1 Hz
+        immediately, not drift down over a minute.
+        """
+        arrivals = self._arrivals[seat_id]
+        if len(arrivals) < 2:
+            return 0.0
+        span = self._clock() - arrivals[0]
+        if span <= 0:
+            return 0.0
+        return len(arrivals) / span
+
+    def is_throttled(self, seat_id):
+        """True when a connected seat is streaming far below the intended rate.
+
+        The signature of a backgrounded tab: still connected, still sending,
+        but at the ~1 Hz browsers clamp hidden timers to.
+        """
+        if seat_id not in self._sockets or self.is_stale(seat_id):
+            return False
+        return self.rate_of(seat_id) < THROTTLED_BELOW_HZ
+
     def is_stale(self, seat_id):
         """True when a seat holds its socket open but has stopped sending.
 
@@ -246,6 +291,8 @@ class PlayerHub:
                     id=sid,
                     connected=sid in self._sockets,
                     stale=self.is_stale(sid),
+                    rate=round(self.rate_of(sid), 1),
+                    throttled=self.is_throttled(sid),
                 )
                 for sid in self.seat_ids
             ],
