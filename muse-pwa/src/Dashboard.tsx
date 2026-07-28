@@ -21,32 +21,56 @@ const drivePercent = (normalized: number) =>
 
 const driveColor = (seat: SeatState) => {
   if (!seat.connected) return 'var(--text-muted)';
+  // A stale reading is not wrong so much as old; colouring it like a live
+  // value is what makes a dead seat look alive.
+  if (seat.stale) return 'var(--text-muted)';
   if (seat.calibrating) return 'var(--warning)';
   return seat.normalized >= 0 ? 'var(--success)' : 'var(--primary)';
 };
 
+const statusLabel = (seat: SeatState) => {
+  if (!seat.connected) return 'Empty';
+  if (seat.stale) return 'No data';
+  return seat.calibrating ? 'Calibrating' : 'Live';
+};
+
+const statusColor = (seat: SeatState) => {
+  if (!seat.connected) return 'var(--text-muted)';
+  if (seat.stale) return 'var(--warning)';
+  return 'var(--success)';
+};
+
 function SeatCard({ seat }: { seat: SeatState }) {
   const percent = drivePercent(seat.normalized);
+  const dotColor = statusColor(seat);
 
   return (
-    <section className={`seat-card ${seat.connected ? '' : 'seat-empty'}`}>
+    <section
+      className={`seat-card ${!seat.connected ? 'seat-empty' : ''} ${seat.stale ? 'seat-stale' : ''}`}
+    >
       <header className="seat-head">
         <span className="seat-name">{seat.id.toUpperCase()}</span>
         <span className="seat-status">
           <span
             className="status-dot"
             style={{
-              background: seat.connected ? 'var(--success)' : 'var(--text-muted)',
-              boxShadow: seat.connected ? '0 0 8px var(--success-glow)' : 'none',
+              background: dotColor,
+              boxShadow: seat.connected && !seat.stale ? '0 0 8px var(--success-glow)' : 'none',
             }}
           />
-          {seat.connected ? (seat.calibrating ? 'Calibrating' : 'Live') : 'Empty'}
+          {statusLabel(seat)}
         </span>
       </header>
 
       <div className="seat-score" style={{ color: driveColor(seat) }}>
         {seat.connected ? `${seat.normalized >= 0 ? '+' : ''}${seat.normalized.toFixed(2)}` : '--'}
       </div>
+
+      {seat.stale && (
+        <div className="seat-stale-note">
+          connected but silent — last value shown
+        </div>
+      )}
 
       <div className="drive-track">
         <div className="drive-midline" />
@@ -128,7 +152,9 @@ export default function Dashboard() {
     }
   };
 
-  const liveCount = state.seats.filter((s) => s.connected).length;
+  // A silent seat is not live, whatever its socket says.
+  const liveCount = state.seats.filter((s) => s.connected && !s.stale).length;
+  const staleCount = state.seats.filter((s) => s.stale).length;
 
   return (
     <div className="dash-container">
@@ -137,6 +163,11 @@ export default function Dashboard() {
           <h1 className="dash-title">Muse Operator</h1>
           <span className="dash-subtitle">
             {liveCount} of {state.seats.length} seats live
+            {staleCount > 0 && (
+              <span style={{ color: 'var(--warning)' }}>
+                {' '}· {staleCount} silent
+              </span>
+            )}
           </span>
         </div>
 

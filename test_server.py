@@ -167,6 +167,66 @@ class TestPlayerHub:
         assert occupancy == {"p1": False, "p2": True, "p3": False}
         assert snapshot["recording"]["active"] is False
 
+    def test_seat_goes_stale_when_telemetry_stops(self):
+        # An open socket is not evidence of a live headset: a slept phone or a
+        # dropped Muse leaves the websocket up while the data stops.
+        now = [1000.0]
+        hub = PlayerHub(seat_ids=make_seat_ids(2), clock=lambda: now[0])
+        hub.attach("p1", object())
+        hub.handle_message("p1", json.dumps({"normalizedScore": 0.5}))
+        assert hub.is_stale("p1") is False
+
+        now[0] += 1.0
+        assert hub.is_stale("p1") is False, "still inside the grace window"
+
+        now[0] += 5.0
+        assert hub.is_stale("p1") is True
+
+        # Fresh telemetry revives it without needing a reconnect.
+        hub.handle_message("p1", json.dumps({"normalizedScore": 0.6}))
+        assert hub.is_stale("p1") is False
+
+    def test_a_seat_that_never_sends_goes_stale(self):
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        hub.attach("p1", object())
+        assert hub.is_stale("p1") is False
+        now[0] += 10.0
+        assert hub.is_stale("p1") is True
+
+    def test_an_empty_seat_is_never_stale(self):
+        # Empty already says everything; stale would be noise on top of it.
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        now[0] += 10_000.0
+        assert hub.is_stale("p1") is False
+
+    def test_disconnect_clears_the_staleness_clock(self):
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        socket = object()
+        hub.attach("p1", socket)
+        now[0] += 10.0
+        assert hub.is_stale("p1") is True
+        hub.detach("p1", socket)
+        assert hub.is_stale("p1") is False
+
+    def test_snapshot_reports_staleness_per_seat(self):
+        now = [0.0]
+        hub = PlayerHub(seat_ids=make_seat_ids(2), clock=lambda: now[0])
+        hub.attach("p1", object())
+        hub.handle_message("p1", json.dumps({"normalizedScore": 0.5}))
+        now[0] += 10.0
+        hub.attach("p2", object())
+        hub.handle_message("p2", json.dumps({"normalizedScore": -0.5}))
+
+        seats = {s["id"]: s for s in hub.snapshot()["seats"]}
+        assert seats["p1"] == {
+            "id": "p1", "connected": True, "stale": True,
+            "raw": 0.0, "normalized": 0.5, "calibrating": False,
+        }
+        assert seats["p2"]["stale"] is False
+
     def test_snapshot_does_not_alias_internal_state(self):
         hub = PlayerHub()
         snapshot = hub.snapshot()

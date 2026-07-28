@@ -119,6 +119,20 @@
   opacity: 0.45;
 }
 
+/* Distinct from both live and empty: the seat is occupied, but what it shows
+   is history, not a reading. */
+.seat-stale {
+  opacity: 0.7;
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+.seat-stale-note {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: var(--warning);
+  font-style: italic;
+}
+
 .seat-head {
   display: flex;
   justify-content: space-between;

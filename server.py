@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import ssl
+import time
 from pathlib import Path
 
 from aiohttp import WSCloseCode, WSMsgType, web
@@ -35,6 +36,11 @@ DEFAULT_PORT = 8443
 
 # The dashboard is for human eyes; it does not need the 30 Hz players stream at.
 OBSERVER_HZ = 10
+
+# How long a seat may hold its socket open without sending anything before the
+# dashboard stops calling it live. Clients stream at 30 Hz, so this is a very
+# wide margin — it only trips when data has genuinely stopped.
+STALE_AFTER_S = 3.0
 
 HUB = web.AppKey("hub")
 STATIC_DIR = web.AppKey("static_dir", Path)
@@ -69,13 +75,16 @@ class PlayerHub:
     its state transitions are testable without standing up a server.
     """
 
-    def __init__(self, seat_ids=None, recorder=None):
+    def __init__(self, seat_ids=None, recorder=None, clock=None):
         self.seat_ids = tuple(seat_ids) if seat_ids else make_seat_ids(DEFAULT_SEAT_COUNT)
         self._sockets = {}
         self._states = {sid: _blank_state() for sid in self.seat_ids}
         self._observers = set()
         self._recorder = recorder
         self._label = ""
+        # Injectable so staleness is testable without waiting in real time.
+        self._clock = clock or time.monotonic
+        self._last_seen = {sid: None for sid in self.seat_ids}
 
     # -- seats ---------------------------------------------------------------
 
@@ -86,6 +95,9 @@ class PlayerHub:
         """Claim a seat. Returns the socket this one displaced, if any."""
         displaced = self._sockets.get(seat_id)
         self._sockets[seat_id] = socket
+        # Start the staleness clock at connect, so a seat that never sends
+        # anything goes stale rather than sitting at a default forever.
+        self._last_seen[seat_id] = self._clock()
         self._record(ADDR_SEAT, [seat_id, "connect"])
         return displaced
 
@@ -98,6 +110,7 @@ class PlayerHub:
         """
         if self._sockets.get(seat_id) is socket:
             del self._sockets[seat_id]
+            self._last_seen[seat_id] = None
             self._record(ADDR_SEAT, [seat_id, "disconnect"])
             return True
         return False
@@ -138,6 +151,7 @@ class PlayerHub:
             return IGNORED
 
         self._states[seat_id] = state
+        self._last_seen[seat_id] = self._clock()
         self._record(
             ADDR_TELEMETRY,
             [seat_id, state["raw"], state["normalized"], int(state["calibrating"])],
@@ -196,6 +210,21 @@ class PlayerHub:
 
     # -- snapshot ------------------------------------------------------------
 
+    def is_stale(self, seat_id):
+        """True when a seat holds its socket open but has stopped sending.
+
+        An open socket is not evidence of a live headset. A phone whose screen
+        slept, a backgrounded tab, or a Muse that fell off all leave the
+        websocket up while telemetry stops, and the dashboard would otherwise
+        keep showing the last value it ever saw as though it were current.
+        """
+        if seat_id not in self._sockets:
+            return False
+        last = self._last_seen.get(seat_id)
+        if last is None:
+            return True
+        return (self._clock() - last) > STALE_AFTER_S
+
     def snapshot(self):
         """Whole state, as broadcast to observers and returned by /healthz.
 
@@ -206,7 +235,12 @@ class PlayerHub:
         return {
             "type": "state",
             "seats": [
-                dict(self._states[sid], id=sid, connected=sid in self._sockets)
+                dict(
+                    self._states[sid],
+                    id=sid,
+                    connected=sid in self._sockets,
+                    stale=self.is_stale(sid),
+                )
                 for sid in self.seat_ids
             ],
             "recording": {"active": self.recording, "label": self._label},

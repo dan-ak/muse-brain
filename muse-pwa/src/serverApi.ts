@@ -4,6 +4,8 @@
 export type SeatState = {
   id: string;
   connected: boolean;
+  /** Socket is open but telemetry has stopped — the value shown is not current. */
+  stale: boolean;
   raw: number;
   normalized: number;
   calibrating: boolean;
