@@ -67,7 +67,16 @@ fi
 "$ACME" --set-default-ca --server letsencrypt
 
 echo "Issuing a certificate for $MUSE_DOMAIN via $MUSE_DNS_PROVIDER."
-"$ACME" --issue --dns "$MUSE_DNS_PROVIDER" -d "$MUSE_DOMAIN"
+
+# acme.sh exits non-zero when it decides a renewal is not due yet. For us that
+# is success -- a valid certificate exists -- but set -e would abort here and
+# skip the install and permission steps below, silently leaving whatever was in
+# $TLS_DIR beforehand. Re-running this script has to be safe and idempotent.
+issue_status=0
+"$ACME" --issue --dns "$MUSE_DNS_PROVIDER" -d "$MUSE_DOMAIN" || issue_status=$?
+if [ "$issue_status" -ne 0 ]; then
+  echo "acme.sh exited $issue_status (typically 'renewal not due'); continuing to install."
+fi
 
 mkdir -p "$TLS_DIR"
 

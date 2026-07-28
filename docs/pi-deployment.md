@@ -32,21 +32,35 @@ zone is doing.
 
 ### 2. Install the code
 
-```bash
-sudo useradd --system --home /opt/muse-brain muse
-sudo git clone https://github.com/dan-ak/muse-brain /opt/muse-brain
-cd /opt/muse-brain
-sudo python3 -m venv .venv
-sudo .venv/bin/pip install -r requirements-server.txt
-```
-
-Build the PWA bundle. Node on the Pi works but is slow; building on the laptop
-and copying `muse-pwa/dist/` across is fine, since the bundle is
-architecture-independent.
+Push from the laptop rather than cloning on the Pi. The repository is private,
+so cloning would mean putting a GitHub credential on a machine that spends a
+week in the desert, and rsync avoids that entirely. Build the bundle on the
+laptop first — it is architecture-independent, so shipping `dist/` means the Pi
+never needs Node at all.
 
 ```bash
-cd muse-pwa && npm ci && npm run build
+# on the laptop, from the repo root
+cd muse-pwa && npm ci && npm run build && cd ..
+
+rsync -a --delete \
+  --exclude '.git' --exclude 'node_modules' --exclude '.venv' \
+  --exclude 'recordings' --exclude '__pycache__' --exclude 'tls' \
+  ./ pi@raspberrypi.local:/home/pi/muse-brain/
 ```
+
+Then on the Pi:
+
+```bash
+sudo useradd --system --home-dir /opt/muse-brain --shell /usr/sbin/nologin muse
+sudo mkdir -p /opt/muse-brain /etc/muse-brain/tls
+sudo rsync -a --delete --exclude '.venv' /home/pi/muse-brain/ /opt/muse-brain/
+sudo python3 -m venv /opt/muse-brain/.venv
+sudo /opt/muse-brain/.venv/bin/pip install -r /opt/muse-brain/requirements-server.txt
+sudo chown -R muse:muse /opt/muse-brain
+```
+
+Updating later is the same two rsyncs followed by
+`sudo systemctl restart muse-brain`.
 
 ### 3. Issue the certificate
 

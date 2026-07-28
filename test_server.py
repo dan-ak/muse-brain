@@ -167,6 +167,144 @@ class TestPlayerHub:
         assert occupancy == {"p1": False, "p2": True, "p3": False}
         assert snapshot["recording"]["active"] is False
 
+    def test_seat_goes_stale_when_telemetry_stops(self):
+        # An open socket is not evidence of a live headset: a slept phone or a
+        # dropped Muse leaves the websocket up while the data stops.
+        now = [1000.0]
+        hub = PlayerHub(seat_ids=make_seat_ids(2), clock=lambda: now[0])
+        hub.attach("p1", object())
+        hub.handle_message("p1", json.dumps({"normalizedScore": 0.5}))
+        assert hub.is_stale("p1") is False
+
+        now[0] += 1.0
+        assert hub.is_stale("p1") is False, "still inside the grace window"
+
+        now[0] += 5.0
+        assert hub.is_stale("p1") is True
+
+        # Fresh telemetry revives it without needing a reconnect.
+        hub.handle_message("p1", json.dumps({"normalizedScore": 0.6}))
+        assert hub.is_stale("p1") is False
+
+    def test_a_seat_repeating_one_value_goes_stale(self):
+        # Observed live: a tab whose headset had dropped kept streaming its last
+        # score at 30 Hz. Frames were arriving, so a receive-based check called
+        # it live while the dashboard showed a number frozen for minutes.
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        hub.attach("p1", object())
+        frozen = json.dumps({"rawScore": 1.0, "normalizedScore": -0.1294941623381023})
+
+        hub.handle_message("p1", frozen)
+        assert hub.is_stale("p1") is False
+
+        for _ in range(200):
+            now[0] += 0.05
+            hub.handle_message("p1", frozen)
+
+        assert hub.is_stale("p1") is True, "identical readings are not liveness"
+
+        # A genuinely new reading revives it.
+        hub.handle_message("p1", json.dumps({"rawScore": 1.0, "normalizedScore": -0.13}))
+        assert hub.is_stale("p1") is False
+
+    def test_a_seat_that_never_sends_goes_stale(self):
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        hub.attach("p1", object())
+        assert hub.is_stale("p1") is False
+        now[0] += 10.0
+        assert hub.is_stale("p1") is True
+
+    def test_an_empty_seat_is_never_stale(self):
+        # Empty already says everything; stale would be noise on top of it.
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        now[0] += 10_000.0
+        assert hub.is_stale("p1") is False
+
+    def test_disconnect_clears_the_staleness_clock(self):
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        socket = object()
+        hub.attach("p1", socket)
+        now[0] += 10.0
+        assert hub.is_stale("p1") is True
+        hub.detach("p1", socket)
+        assert hub.is_stale("p1") is False
+
+    def test_rate_reflects_the_arrival_interval(self):
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        hub.attach("p1", object())
+        for i in range(60):
+            now[0] += 1 / 30
+            hub.handle_message("p1", json.dumps({"normalizedScore": i / 100}))
+        assert 25 <= hub.rate_of("p1") <= 35
+        assert hub.is_throttled("p1") is False
+
+    def test_a_backgrounded_tab_reads_as_throttled(self):
+        # Browsers clamp timers in hidden tabs to ~1 Hz, so a pocketed phone
+        # keeps streaming and keeps looking connected while its data rate
+        # collapses. Observed live: 59 rows in 58s against another seat's 1422.
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        hub.attach("p1", object())
+        for i in range(10):
+            now[0] += 1.0
+            hub.handle_message("p1", json.dumps({"normalizedScore": i / 100}))
+
+        assert hub.rate_of("p1") < 2.0
+        assert hub.is_throttled("p1") is True
+        # Throttled is not stale: the data is still arriving and still changing.
+        assert hub.is_stale("p1") is False
+
+    def test_an_empty_or_stale_seat_is_not_reported_throttled(self):
+        # Throttled means "connected but slow"; it would be noise on a seat
+        # that is empty or already flagged as silent.
+        now = [0.0]
+        hub = PlayerHub(clock=lambda: now[0])
+        assert hub.is_throttled("p1") is False
+
+        hub.attach("p1", object())
+        hub.handle_message("p1", json.dumps({"normalizedScore": 0.5}))
+        now[0] += 30.0
+        assert hub.is_stale("p1") is True
+        assert hub.is_throttled("p1") is False
+
+    def test_snapshot_carries_rate_and_throttle_flags(self):
+        now = [0.0]
+        hub = PlayerHub(seat_ids=make_seat_ids(2), clock=lambda: now[0])
+        hub.attach("p1", object())
+        for i in range(60):
+            now[0] += 1 / 30
+            hub.handle_message("p1", json.dumps({"normalizedScore": i / 100}))
+
+        seats = {s["id"]: s for s in hub.snapshot()["seats"]}
+        assert 25 <= seats["p1"]["rate"] <= 35
+        assert seats["p1"]["throttled"] is False
+        assert seats["p2"]["rate"] == 0.0
+        assert seats["p2"]["throttled"] is False
+
+    def test_snapshot_reports_staleness_per_seat(self):
+        now = [0.0]
+        hub = PlayerHub(seat_ids=make_seat_ids(2), clock=lambda: now[0])
+        hub.attach("p1", object())
+        hub.handle_message("p1", json.dumps({"normalizedScore": 0.5}))
+        now[0] += 10.0
+        hub.attach("p2", object())
+        hub.handle_message("p2", json.dumps({"normalizedScore": -0.5}))
+
+        seats = {s["id"]: s for s in hub.snapshot()["seats"]}
+        assert seats["p1"] == {
+            "id": "p1", "connected": True, "stale": True,
+            "raw": 0.0, "normalized": 0.5, "calibrating": False,
+            # A single arrival gives no interval to measure, and a stale seat
+            # is never also reported as throttled.
+            "rate": 0.0, "throttled": False,
+        }
+        assert seats["p2"]["stale"] is False
+
     def test_snapshot_does_not_alias_internal_state(self):
         hub = PlayerHub()
         snapshot = hub.snapshot()

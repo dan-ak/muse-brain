@@ -1,0 +1,47 @@
+diff --git a/node_modules/web-muse/src/lib/MuseDevice.js b/node_modules/web-muse/src/lib/MuseDevice.js
+index 5c3a8ac..6efa611 100644
+--- a/node_modules/web-muse/src/lib/MuseDevice.js
++++ b/node_modules/web-muse/src/lib/MuseDevice.js
+@@ -263,10 +263,18 @@ export class MuseBase {
+       const c = str[i];
+       this.#infoFragment = this.#infoFragment + c;
+       if (c === "}") {
+-        const tmp = JSON.parse(this.#infoFragment);
+-        this.#infoFragment = "";
+-        for (const key in tmp) {
+-          info[key] = tmp[key];
++        try {
++          // Fix unquoted Muse headband names (e.g. :Muse-78C8 -> :"Muse-78C8")
++          const sanitized = this.#infoFragment.replace(/:\s*(Muse-[a-zA-Z0-9]+)/g, ':"$1"');
++          const tmp = JSON.parse(sanitized);
++          this.#infoFragment = "";
++          for (const key in tmp) {
++            info[key] = tmp[key];
++          }
++        } catch (e) {
++          // If the packet was split across chunks and is incomplete, we keep accumulating.
++          // Otherwise, we log it without crashing the GATT stream.
++          console.debug("Info packet parse deferred or failed (waiting for more data):", this.#infoFragment);
+         }
+       }
+     }
+@@ -365,7 +373,7 @@ export class MuseBase {
+   async #connectChar(service, cid, hook) {
+     const c = await service["getCharacteristic"](cid);
+     c["oncharacteristicvaluechanged"] = hook;
+-    c["startNotifications"]();
++    await c["startNotifications"]();
+     return c;
+   }
+   /**
+@@ -558,8 +566,8 @@ export class MuseBase {
+     const service = await gatt["getPrimaryService"](this.#SERVICE);
+     const that = this;
+     this.#dev.addEventListener("gattserverdisconnected", function () {
+-      this.#dev = null;
+-      this.#state = 0;
++      that.#dev = null;
++      that.#state = 0;
+       that.disconnected();
+     });
+     this.#controlChar = await this.#connectChar(

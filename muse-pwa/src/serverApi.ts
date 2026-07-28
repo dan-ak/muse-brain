@@ -4,6 +4,12 @@
 export type SeatState = {
   id: string;
   connected: boolean;
+  /** Socket is open but telemetry has stopped — the value shown is not current. */
+  stale: boolean;
+  /** Frames per second arriving from this seat. */
+  rate: number;
+  /** Connected and sending, but far below the intended rate — a backgrounded tab. */
+  throttled: boolean;
   raw: number;
   normalized: number;
   calibrating: boolean;

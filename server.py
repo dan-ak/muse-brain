@@ -20,6 +20,8 @@ import json
 import logging
 import os
 import ssl
+import time
+from collections import deque
 from pathlib import Path
 
 from aiohttp import WSCloseCode, WSMsgType, web
@@ -35,6 +37,19 @@ DEFAULT_PORT = 8443
 
 # The dashboard is for human eyes; it does not need the 30 Hz players stream at.
 OBSERVER_HZ = 10
+
+# How long a seat may hold its socket open without sending anything before the
+# dashboard stops calling it live. Clients stream at 30 Hz, so this is a very
+# wide margin — it only trips when data has genuinely stopped.
+STALE_AFTER_S = 3.0
+
+# Window over which each seat's arrival rate is measured.
+RATE_WINDOW_S = 2.0
+
+# Browsers throttle timers in hidden tabs to roughly 1 Hz, so a phone that
+# locks its screen silently drops from 30 Hz to 1 Hz while still looking
+# connected. Anything this slow is reported as throttled rather than healthy.
+THROTTLED_BELOW_HZ = 5.0
 
 HUB = web.AppKey("hub")
 STATIC_DIR = web.AppKey("static_dir", Path)
@@ -69,13 +84,17 @@ class PlayerHub:
     its state transitions are testable without standing up a server.
     """
 
-    def __init__(self, seat_ids=None, recorder=None):
+    def __init__(self, seat_ids=None, recorder=None, clock=None):
         self.seat_ids = tuple(seat_ids) if seat_ids else make_seat_ids(DEFAULT_SEAT_COUNT)
         self._sockets = {}
         self._states = {sid: _blank_state() for sid in self.seat_ids}
         self._observers = set()
         self._recorder = recorder
         self._label = ""
+        # Injectable so staleness and rate are testable without waiting in real time.
+        self._clock = clock or time.monotonic
+        self._last_seen = {sid: None for sid in self.seat_ids}
+        self._arrivals = {sid: deque() for sid in self.seat_ids}
 
     # -- seats ---------------------------------------------------------------
 
@@ -86,6 +105,9 @@ class PlayerHub:
         """Claim a seat. Returns the socket this one displaced, if any."""
         displaced = self._sockets.get(seat_id)
         self._sockets[seat_id] = socket
+        # Start the staleness clock at connect, so a seat that never sends
+        # anything goes stale rather than sitting at a default forever.
+        self._last_seen[seat_id] = self._clock()
         self._record(ADDR_SEAT, [seat_id, "connect"])
         return displaced
 
@@ -98,6 +120,7 @@ class PlayerHub:
         """
         if self._sockets.get(seat_id) is socket:
             del self._sockets[seat_id]
+            self._last_seen[seat_id] = None
             self._record(ADDR_SEAT, [seat_id, "disconnect"])
             return True
         return False
@@ -137,7 +160,15 @@ class PlayerHub:
         except (TypeError, ValueError):
             return IGNORED
 
+        # Only a *changed* reading counts as liveness. A client whose headset
+        # dropped keeps streaming its last computed score at 30 Hz, so frames
+        # arriving is not evidence of a live headset — the value moving is.
+        # Real EEG-derived scores never repeat bit-for-bit, so an identical
+        # reading means the source is frozen.
+        if state != self._states[seat_id]:
+            self._last_seen[seat_id] = self._clock()
         self._states[seat_id] = state
+        self._note_arrival(seat_id)
         self._record(
             ADDR_TELEMETRY,
             [seat_id, state["raw"], state["normalized"], int(state["calibrating"])],
@@ -196,6 +227,55 @@ class PlayerHub:
 
     # -- snapshot ------------------------------------------------------------
 
+    def _note_arrival(self, seat_id):
+        now = self._clock()
+        arrivals = self._arrivals[seat_id]
+        arrivals.append(now)
+        cutoff = now - RATE_WINDOW_S
+        while arrivals and arrivals[0] < cutoff:
+            arrivals.popleft()
+
+    def rate_of(self, seat_id):
+        """Frames per second over the recent window.
+
+        Measured from arrival timestamps rather than counted per wall-clock
+        second, so it reflects the rate right now instead of averaging across a
+        transition — a phone that just locked its screen should read ~1 Hz
+        immediately, not drift down over a minute.
+        """
+        arrivals = self._arrivals[seat_id]
+        if len(arrivals) < 2:
+            return 0.0
+        span = self._clock() - arrivals[0]
+        if span <= 0:
+            return 0.0
+        return len(arrivals) / span
+
+    def is_throttled(self, seat_id):
+        """True when a connected seat is streaming far below the intended rate.
+
+        The signature of a backgrounded tab: still connected, still sending,
+        but at the ~1 Hz browsers clamp hidden timers to.
+        """
+        if seat_id not in self._sockets or self.is_stale(seat_id):
+            return False
+        return self.rate_of(seat_id) < THROTTLED_BELOW_HZ
+
+    def is_stale(self, seat_id):
+        """True when a seat holds its socket open but has stopped sending.
+
+        An open socket is not evidence of a live headset. A phone whose screen
+        slept, a backgrounded tab, or a Muse that fell off all leave the
+        websocket up while telemetry stops, and the dashboard would otherwise
+        keep showing the last value it ever saw as though it were current.
+        """
+        if seat_id not in self._sockets:
+            return False
+        last = self._last_seen.get(seat_id)
+        if last is None:
+            return True
+        return (self._clock() - last) > STALE_AFTER_S
+
     def snapshot(self):
         """Whole state, as broadcast to observers and returned by /healthz.
 
@@ -206,7 +286,14 @@ class PlayerHub:
         return {
             "type": "state",
             "seats": [
-                dict(self._states[sid], id=sid, connected=sid in self._sockets)
+                dict(
+                    self._states[sid],
+                    id=sid,
+                    connected=sid in self._sockets,
+                    stale=self.is_stale(sid),
+                    rate=round(self.rate_of(sid), 1),
+                    throttled=self.is_throttled(sid),
+                )
                 for sid in self.seat_ids
             ],
             "recording": {"active": self.recording, "label": self._label},

@@ -21,6 +21,9 @@ const CHANNEL_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ec4899']; // Blue, Gr
 // explain it, rather than letting the pair button throw something cryptic.
 const bluetoothAvailable = window.isSecureContext && 'bluetooth' in navigator;
 
+// Close code the server uses when it hands a seat to a newer connection.
+const SEAT_TAKEN_CODE = 1001;
+
 function App() {
   // Device & Connection State
   const [museDevice, setMuseDevice] = useState<Muse | null>(null);
@@ -32,6 +35,11 @@ function App() {
   // server flag rather than a rebuild of this bundle.
   const [seats, setSeats] = useState<string[]>([]);
   const [playerId, setPlayerId] = useState<string>('p1');
+  const [seatTaken, setSeatTaken] = useState(false);
+  const [screenHeld, setScreenHeld] = useState(false);
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+  // Bumped to deliberately re-enter the seat after another device took it.
+  const [reclaimNonce, setReclaimNonce] = useState(0);
   const [wsStatus, setWsStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   
   // DSP & Live EEG Stats
@@ -78,29 +86,101 @@ function App() {
     };
   }, []);
 
+  // 0b. Hold the screen awake while a headset is streaming.
+  //
+  // Browsers clamp timers in hidden tabs to about 1 Hz, so the moment a phone
+  // locks or the tab goes to the background this client drops from 30 Hz to
+  // 1 Hz. Nothing errors and the seat still reads connected, so the loss is
+  // invisible until you look at the recording afterwards.
+  useEffect(() => {
+    if (!isConnected || !('wakeLock' in navigator)) return;
+
+    let cancelled = false;
+
+    const acquire = async () => {
+      try {
+        const lock = await navigator.wakeLock.request('screen');
+        if (cancelled) {
+          void lock.release();
+          return;
+        }
+        wakeLockRef.current = lock;
+        setScreenHeld(true);
+        // The browser drops the lock on its own when the page hides, so track
+        // that rather than assuming we still hold it.
+        lock.addEventListener('release', () => setScreenHeld(false));
+      } catch (err) {
+        // Refusal is not fatal — low battery mode declines these. Stream on.
+        console.warn('Screen wake lock refused:', err);
+        setScreenHeld(false);
+      }
+    };
+
+    // A lock cannot be re-acquired while hidden, so retake it on return
+    // instead of requesting once and assuming it survives.
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void acquire();
+    };
+
+    void acquire();
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      void wakeLockRef.current?.release().catch(() => {});
+      wakeLockRef.current = null;
+      setScreenHeld(false);
+    };
+  }, [isConnected]);
+
   // 1. Maintain WebSocket Connection
   useEffect(() => {
     let reconnectTimeout: number;
+    let cancelled = false;
 
     const connectWS = () => {
-      if (wsRef.current) {
-        wsRef.current.close();
+      if (cancelled) return;
+
+      // Detach the previous socket's handlers before closing it. Otherwise its
+      // onclose fires during the swap and schedules a second reconnect chain,
+      // and the chains multiply.
+      const previous = wsRef.current;
+      if (previous) {
+        previous.onopen = null;
+        previous.onclose = null;
+        previous.onerror = null;
+        previous.close();
       }
 
       setWsStatus('connecting');
       const wsUrl = playerSocketUrl(playerId);
       console.log(`Connecting to WebSocket: ${wsUrl}`);
-      
+
       const socket = new WebSocket(wsUrl);
       wsRef.current = socket;
 
       socket.onopen = () => {
+        if (cancelled) return;
+        setSeatTaken(false);
         setWsStatus('connected');
         console.log('WebSocket connection established.');
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        if (cancelled) return;
         setWsStatus('disconnected');
+
+        // The server always hands a seat to the newest claimant, so that a
+        // phone waking from sleep can reclaim it. Reconnecting here would take
+        // the seat straight back, and two live devices on one seat would
+        // displace each other every few seconds forever. Stop and say so.
+        if (event.code === SEAT_TAKEN_CODE && event.reason.includes('replaced')) {
+          console.warn('Seat claimed by another device; not reconnecting.');
+          setSeatTaken(true);
+          return;
+        }
+
         console.log('WebSocket connection lost. Reconnecting in 3s...');
         reconnectTimeout = window.setTimeout(connectWS, 3000);
       };
@@ -113,12 +193,15 @@ function App() {
     connectWS();
 
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      cancelled = true;
       clearTimeout(reconnectTimeout);
+      const socket = wsRef.current;
+      if (socket) {
+        socket.onclose = null;
+        socket.close();
+      }
     };
-  }, [playerId]);
+  }, [playerId, reclaimNonce]);
 
   // 2. Headset Data Loop (draining the MuseCircularBuffer)
   useEffect(() => {
@@ -568,6 +651,29 @@ function App() {
                 </div>
               )}
 
+              {seatTaken && (
+                <div style={{
+                  background: 'rgba(245, 158, 11, 0.08)',
+                  border: '1px solid var(--warning)',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  fontSize: '0.8rem',
+                  lineHeight: 1.5
+                }}>
+                  <strong style={{ color: 'var(--warning)', display: 'block', marginBottom: '4px' }}>
+                    Seat {playerId.toUpperCase()} taken by another device
+                  </strong>
+                  Another browser claimed this seat, so this one stopped streaming
+                  rather than fighting over it. Pick a different seat, or take it back.
+                  <button
+                    onClick={() => setReclaimNonce((n) => n + 1)}
+                    style={{ width: '100%', marginTop: '10px', fontSize: '0.8rem', padding: '8px' }}
+                  >
+                    Take seat {playerId.toUpperCase()} back
+                  </button>
+                </div>
+              )}
+
               <div className="flex flex-col">
                 <label style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginBottom: '4px' }}>Player Seat</label>
                 <select
@@ -606,9 +712,16 @@ function App() {
                   </button>
                 </div>
               ) : (
-                <button onClick={handleDisconnect} style={{ marginTop: '8px', background: 'rgba(239, 68, 68, 0.1)', borderColor: 'var(--danger)', color: 'var(--danger)' }}>
-                  Disconnect {isMock ? 'Mock' : 'Muse'}
-                </button>
+                <div className="flex flex-col gap-2" style={{ marginTop: '8px' }}>
+                  <button onClick={handleDisconnect} style={{ background: 'rgba(239, 68, 68, 0.1)', borderColor: 'var(--danger)', color: 'var(--danger)' }}>
+                    Disconnect {isMock ? 'Mock' : 'Muse'}
+                  </button>
+                  <span style={{ fontSize: '0.7rem', color: screenHeld ? 'var(--success)' : 'var(--warning)', lineHeight: 1.4 }}>
+                    {screenHeld
+                      ? '🔆 Screen kept awake — streaming at full rate'
+                      : '⚠️ Screen not held. If it locks, streaming drops to ~1 Hz.'}
+                  </span>
+                </div>
               )}
             </div>
           </section>
