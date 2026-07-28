@@ -21,6 +21,9 @@ const CHANNEL_COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ec4899']; // Blue, Gr
 // explain it, rather than letting the pair button throw something cryptic.
 const bluetoothAvailable = window.isSecureContext && 'bluetooth' in navigator;
 
+// Close code the server uses when it hands a seat to a newer connection.
+const SEAT_TAKEN_CODE = 1001;
+
 function App() {
   // Device & Connection State
   const [museDevice, setMuseDevice] = useState<Muse | null>(null);
@@ -32,6 +35,9 @@ function App() {
   // server flag rather than a rebuild of this bundle.
   const [seats, setSeats] = useState<string[]>([]);
   const [playerId, setPlayerId] = useState<string>('p1');
+  const [seatTaken, setSeatTaken] = useState(false);
+  // Bumped to deliberately re-enter the seat after another device took it.
+  const [reclaimNonce, setReclaimNonce] = useState(0);
   const [wsStatus, setWsStatus] = useState<'disconnected' | 'connecting' | 'connected'>('disconnected');
   
   // DSP & Live EEG Stats
@@ -81,26 +87,50 @@ function App() {
   // 1. Maintain WebSocket Connection
   useEffect(() => {
     let reconnectTimeout: number;
+    let cancelled = false;
 
     const connectWS = () => {
-      if (wsRef.current) {
-        wsRef.current.close();
+      if (cancelled) return;
+
+      // Detach the previous socket's handlers before closing it. Otherwise its
+      // onclose fires during the swap and schedules a second reconnect chain,
+      // and the chains multiply.
+      const previous = wsRef.current;
+      if (previous) {
+        previous.onopen = null;
+        previous.onclose = null;
+        previous.onerror = null;
+        previous.close();
       }
 
       setWsStatus('connecting');
       const wsUrl = playerSocketUrl(playerId);
       console.log(`Connecting to WebSocket: ${wsUrl}`);
-      
+
       const socket = new WebSocket(wsUrl);
       wsRef.current = socket;
 
       socket.onopen = () => {
+        if (cancelled) return;
+        setSeatTaken(false);
         setWsStatus('connected');
         console.log('WebSocket connection established.');
       };
 
-      socket.onclose = () => {
+      socket.onclose = (event) => {
+        if (cancelled) return;
         setWsStatus('disconnected');
+
+        // The server always hands a seat to the newest claimant, so that a
+        // phone waking from sleep can reclaim it. Reconnecting here would take
+        // the seat straight back, and two live devices on one seat would
+        // displace each other every few seconds forever. Stop and say so.
+        if (event.code === SEAT_TAKEN_CODE && event.reason.includes('replaced')) {
+          console.warn('Seat claimed by another device; not reconnecting.');
+          setSeatTaken(true);
+          return;
+        }
+
         console.log('WebSocket connection lost. Reconnecting in 3s...');
         reconnectTimeout = window.setTimeout(connectWS, 3000);
       };
@@ -113,12 +143,15 @@ function App() {
     connectWS();
 
     return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
+      cancelled = true;
       clearTimeout(reconnectTimeout);
+      const socket = wsRef.current;
+      if (socket) {
+        socket.onclose = null;
+        socket.close();
+      }
     };
-  }, [playerId]);
+  }, [playerId, reclaimNonce]);
 
   // 2. Headset Data Loop (draining the MuseCircularBuffer)
   useEffect(() => {
@@ -565,6 +598,29 @@ function App() {
                       iOS Safari cannot pair a Muse at all.
                     </>
                   )}
+                </div>
+              )}
+
+              {seatTaken && (
+                <div style={{
+                  background: 'rgba(245, 158, 11, 0.08)',
+                  border: '1px solid var(--warning)',
+                  borderRadius: '8px',
+                  padding: '12px',
+                  fontSize: '0.8rem',
+                  lineHeight: 1.5
+                }}>
+                  <strong style={{ color: 'var(--warning)', display: 'block', marginBottom: '4px' }}>
+                    Seat {playerId.toUpperCase()} taken by another device
+                  </strong>
+                  Another browser claimed this seat, so this one stopped streaming
+                  rather than fighting over it. Pick a different seat, or take it back.
+                  <button
+                    onClick={() => setReclaimNonce((n) => n + 1)}
+                    style={{ width: '100%', marginTop: '10px', fontSize: '0.8rem', padding: '8px' }}
+                  >
+                    Take seat {playerId.toUpperCase()} back
+                  </button>
                 </div>
               )}
 
