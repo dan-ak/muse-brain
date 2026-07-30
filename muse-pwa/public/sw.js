@@ -19,6 +19,11 @@ const CACHE_NAME = 'muse-cache-v2';
 // are live state; a cached answer is always the wrong answer.
 const NEVER_CACHE = ['/healthz', '/api/'];
 
+// How long the network gets before the cache answers instead. Long enough that
+// a healthy LAN always wins, short enough that a black-holed link does not
+// leave the user looking at nothing.
+const NETWORK_TIMEOUT_MS = 1500;
+
 self.addEventListener('install', (event) => {
   // Take over from the previous worker immediately rather than waiting for
   // every tab to close, so a fix reaches devices on the next navigation.
@@ -45,28 +50,63 @@ const putInCache = (request, response) =>
     .then((cache) => cache.put(request, response))
     .catch(() => {});
 
-/** Always go to the network; fall back to cache only when truly offline. */
-const networkFirst = (event) =>
-  fetch(event.request)
-    .then((response) => {
-      if (response && response.status === 200 && response.type === 'basic') {
-        putInCache(event.request, response.clone());
-      }
-      return response;
-    })
-    .catch(() =>
-      caches.match(event.request).then(
-        (cached) =>
-          cached ||
-          // For a navigation, the app shell is a better offline answer than an
-          // error page, and the app itself reports the lost connection.
-          caches.match('/') ||
-          new Response('Offline and nothing cached yet.', {
-            status: 503,
-            headers: { 'Content-Type': 'text/plain' },
-          })
-      )
-    );
+const offlineResponse = () =>
+  new Response('Offline and nothing cached yet.', {
+    status: 503,
+    headers: { 'Content-Type': 'text/plain' },
+  });
+
+/** Prefer the network, but never let a hanging request hold up the page.
+ *
+ * A phone associated to the AP whose packets are being black-holed — marginal
+ * range, or a captive portal — takes tens of seconds to fail by TCP timeout.
+ * Plain network-first meant staring at a blank screen for that whole period on
+ * every launch, so the cache wins if the network has not answered in time and
+ * the request is revalidated in the background regardless.
+ *
+ * `isNavigation` decides the fallback: the app shell is the right answer for a
+ * navigation and the wrong answer for a subresource, where handing back
+ * index.html produces an unparseable manifest and undecodable images instead of
+ * a clean failure.
+ */
+const networkFirst = (event, isNavigation) => {
+  const fromNetwork = fetch(event.request).then((response) => {
+    if (response && response.status === 200 && response.type === 'basic') {
+      putInCache(event.request, response.clone());
+    }
+    return response;
+  });
+
+  const fallback = async () => {
+    const cached = await caches.match(event.request);
+    if (cached) return cached;
+    if (isNavigation) {
+      const shell = await caches.match('/');
+      if (shell) return shell;
+    }
+    return offlineResponse();
+  };
+
+  // Every branch resolves to a Response: awaiting caches.match() rather than
+  // testing the Promise for truthiness is what keeps this from resolving to
+  // undefined, which surfaced as a worker TypeError and a browser error page.
+  return (async () => {
+    const raced = await Promise.race([
+      fromNetwork.catch(() => null),
+      new Promise((resolve) => setTimeout(() => resolve(undefined), NETWORK_TIMEOUT_MS)),
+    ]);
+    if (raced) return raced;
+
+    const cached = await fallback();
+    // If the cache had nothing, the network is still the only hope — wait it out
+    // rather than reporting offline while a slow request may yet succeed.
+    if (cached.status === 503) {
+      const late = await fromNetwork.catch(() => null);
+      if (late) return late;
+    }
+    return cached;
+  })();
+};
 
 /** Content-hashed filenames never change meaning, so cache wins. */
 const cacheFirst = (event) =>
@@ -92,8 +132,11 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return;
   if (NEVER_CACHE.some((prefix) => url.pathname.startsWith(prefix))) return;
 
-  if (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
-    event.respondWith(networkFirst(event));
+  const isNavigation =
+    request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html';
+
+  if (isNavigation) {
+    event.respondWith(networkFirst(event, true));
     return;
   }
 
@@ -102,5 +145,6 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  event.respondWith(networkFirst(event));
+  // Subresources get the same freshness treatment but no shell fallback.
+  event.respondWith(networkFirst(event, false));
 });
