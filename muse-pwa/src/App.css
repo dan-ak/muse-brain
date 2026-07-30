@@ -149,3 +149,20 @@
   font-size: 0.85rem;
   color: var(--text-secondary);
 }
+
+/* Recording indicator. Defined here rather than borrowed from Dashboard.css so
+   the client view does not depend on the operator view's stylesheet, even
+   though Vite happens to bundle both together. */
+.rec-pip {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--danger);
+  flex-shrink: 0;
+  animation: rec-pip-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes rec-pip-pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.25; }
+}
