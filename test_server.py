@@ -15,6 +15,7 @@ from server import (
     PlayerHub,
     build_ssl_context,
     create_app,
+    make_redirect_app,
     make_seat_ids,
 )
 from session_recorder import SessionRecorder
@@ -528,6 +529,49 @@ class TestApp:
             await _settle()
             assert hub.state_of("p1")["normalized"] == 0.75
             await second.close()
+
+
+class TestHttpRedirect:
+    # A tablet typing the address without a scheme got ERR_CONNECTION_REFUSED,
+    # because browsers do not upgrade bare addresses and nothing served port 80.
+
+    @async_test
+    async def test_plain_http_is_bounced_to_https(self):
+        async with TestClient(TestServer(make_redirect_app(443))) as client:
+            response = await client.get("/dashboard", allow_redirects=False)
+            assert response.status == 302
+            assert response.headers["Location"] == "https://127.0.0.1/dashboard"
+
+    @async_test
+    async def test_the_query_string_survives(self):
+        async with TestClient(TestServer(make_redirect_app(443))) as client:
+            response = await client.get("/?seat=p2", allow_redirects=False)
+            assert response.headers["Location"] == "https://127.0.0.1/?seat=p2"
+
+    @async_test
+    async def test_a_nonstandard_https_port_is_carried_over(self):
+        async with TestClient(TestServer(make_redirect_app(8443))) as client:
+            response = await client.get("/", allow_redirects=False)
+            assert response.headers["Location"] == "https://127.0.0.1:8443/"
+
+    @async_test
+    async def test_every_path_and_method_redirects(self):
+        # Whatever a device asks for, the answer is "same thing, over TLS".
+        async with TestClient(TestServer(make_redirect_app(443))) as client:
+            for path in ("/", "/dashboard", "/healthz", "/assets/app.js"):
+                response = await client.get(path, allow_redirects=False)
+                assert response.status == 302, path
+                assert response.headers["Location"].startswith("https://"), path
+            posted = await client.post("/api/session/start", allow_redirects=False)
+            assert posted.status == 302
+
+    @async_test
+    async def test_redirect_is_temporary_not_permanent(self):
+        # A permanent redirect gets cached hard by every phone that hits it,
+        # which is not something you want to undo on someone else's device.
+        async with TestClient(TestServer(make_redirect_app(443))) as client:
+            response = await client.get("/", allow_redirects=False)
+            assert response.status == 302
 
 
 class TestObserver:
