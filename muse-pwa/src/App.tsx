@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { connectMuse, Muse } from 'web-muse';
+import { connectMuse, Muse, MuseCircularBuffer } from 'web-muse';
 import {
   SAMPLE_RATE,
   WINDOW_SIZE,
@@ -23,6 +23,24 @@ const bluetoothAvailable = window.isSecureContext && 'bluetooth' in navigator;
 
 // Close code the server uses when it hands a seat to a newer connection.
 const SEAT_TAKEN_CODE = 1001;
+
+// Raw capture. Every web-muse buffer holds 256 samples, which at 256 Hz is
+// exactly one second of EEG headroom — and when full the buffer discards
+// incoming samples rather than overwriting old ones. Draining on a timer rather
+// than requestAnimationFrame matters: rAF stops entirely in a hidden tab, so a
+// locked screen would lose raw samples outright instead of merely slowing down.
+const DRAIN_INTERVAL_MS = 100;
+const RAW_SEND_HZ = 10;
+
+type RawQueue = {
+  eeg: number[][];
+  ppg: number[][];
+  acc: number[][];
+  gyro: number[][];
+  bands: number[][];
+};
+
+const emptyRawQueue = (): RawQueue => ({ eeg: [], ppg: [], acc: [], gyro: [], bands: [] });
 
 function App() {
   // Device & Connection State
@@ -65,6 +83,15 @@ function App() {
   const calibrationSamplesRef = useRef<number[]>([]);
   const relaxSamplesRef = useRef<number[]>([]);
   const focusSamplesRef = useRef<number[]>([]);
+
+  // Raw capture. Queues accumulate between sends; a ref rather than state
+  // because the streaming effect rebuilds often and must not lose samples.
+  const rawQueueRef = useRef<RawQueue>(emptyRawQueue());
+  const overflowsRef = useRef<Record<string, number>>({});
+  // Read by the data loop, so a ref: reading state there would capture a stale
+  // value from whichever render created the closure.
+  const recordingRef = useRef(false);
+  const [serverRecording, setServerRecording] = useState(false);
 
   // Canvas Reference
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -167,6 +194,21 @@ function App() {
         console.log('WebSocket connection established.');
       };
 
+      // The server announces session state on connect and whenever it changes,
+      // so raw capture only runs while something is actually recording.
+      socket.onmessage = (event) => {
+        if (cancelled) return;
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg?.type === 'recording') {
+            recordingRef.current = !!msg.active;
+            setServerRecording(!!msg.active);
+          }
+        } catch {
+          // A malformed frame from the server is not worth reacting to.
+        }
+      };
+
       socket.onclose = (event) => {
         if (cancelled) return;
         setWsStatus('disconnected');
@@ -210,40 +252,97 @@ function App() {
       return;
     }
 
-    let dspInterval: number;
-    let wsStreamInterval: number;
     let mockDataGeneratorInterval: number;
     let animationFrameId: number;
 
-    // A. Read samples from Muse Circular Buffer into our local sliding window
+    const noteOverflow = (stream: string) => {
+      overflowsRef.current[stream] = (overflowsRef.current[stream] ?? 0) + 1;
+    };
+
+    /** Read one aligned row across parallel per-channel buffers, repeatedly. */
+    const drainAligned = (buffers: MuseCircularBuffer[] | undefined, width: number, stream: string) => {
+      const rows: number[][] = [];
+      if (!buffers) return rows;
+      const bufs = buffers.slice(0, width);
+      if (bufs.length < width || bufs.some((b) => !b)) return rows;
+
+      // Check before reading: read() clears isFull, so afterwards the evidence
+      // that samples were discarded is gone.
+      if (bufs.some((b) => b.isFull)) noteOverflow(stream);
+
+      const available = Math.min(...bufs.map((b) => b.length));
+      for (let i = 0; i < available; i++) {
+        const row: number[] = [];
+        for (const b of bufs) {
+          const sample = b.read();
+          if (sample === null) return rows;
+          row.push(sample);
+        }
+        rows.push(row);
+      }
+      return rows;
+    };
+
+    // A. Read samples from the Muse buffers into our sliding windows, and into
+    // the raw queue when a session is recording.
     const pollBuffers = () => {
-      // Draining the buffers
+      const eegBufs = [];
       for (let ch = 0; ch < CHANNELS; ch++) {
-        const buffer = museDevice.eeg[ch];
-        if (!buffer) continue;
+        if (museDevice.eeg[ch]) eegBufs.push(museDevice.eeg[ch]);
+      }
 
-        let sample: number | null;
-        while ((sample = buffer.read()) !== null) {
-          // Push to FFT sliding window (512 samples)
-          eegBuffersRef.current[ch].push(sample);
-          if (eegBuffersRef.current[ch].length > WINDOW_SIZE) {
-            eegBuffersRef.current[ch].shift();
+      if (eegBufs.length === CHANNELS) {
+        if (eegBufs.some((b) => b.isFull)) noteOverflow('eeg');
+        const available = Math.min(...eegBufs.map((b) => b.length));
+        for (let i = 0; i < available; i++) {
+          const row: number[] = [];
+          for (let ch = 0; ch < CHANNELS; ch++) {
+            const sample = eegBufs[ch].read();
+            if (sample === null) break;
+            row.push(sample);
+
+            // FFT sliding window (512 samples)
+            eegBuffersRef.current[ch].push(sample);
+            if (eegBuffersRef.current[ch].length > WINDOW_SIZE) {
+              eegBuffersRef.current[ch].shift();
+            }
+
+            // UI scrolling waveform (200 samples)
+            scrollBuffersRef.current[ch].push(sample);
+            if (scrollBuffersRef.current[ch].length > 200) {
+              scrollBuffersRef.current[ch].shift();
+            }
           }
-
-          // Push to UI scrolling waveforms buffer (200 samples)
-          scrollBuffersRef.current[ch].push(sample);
-          if (scrollBuffersRef.current[ch].length > 200) {
-            scrollBuffersRef.current[ch].shift();
+          // Rows go to the recorder aligned across channels, so drain them here
+          // rather than per channel — the FFT does not care about alignment but
+          // a recording of raw EEG very much does.
+          if (row.length === CHANNELS && recordingRef.current) {
+            rawQueueRef.current.eeg.push(row);
           }
         }
+      }
+
+      // These are drained whether or not we are recording. Left alone they stay
+      // permanently full, which both wastes the sensor and makes every overflow
+      // check report a false positive.
+      const ppg = drainAligned(museDevice.ppg, 3, 'ppg');
+      const acc = drainAligned(museDevice.accelerometer, 3, 'acc');
+      const gyro = drainAligned(museDevice.gyroscope, 3, 'gyro');
+      if (recordingRef.current) {
+        rawQueueRef.current.ppg.push(...ppg);
+        rawQueueRef.current.acc.push(...acc);
+        rawQueueRef.current.gyro.push(...gyro);
       }
 
       // Read battery level if available
       if (museDevice.batteryLevel !== null) {
         setBattery(museDevice.batteryLevel);
       }
+    };
 
-      animationFrameId = requestAnimationFrame(pollBuffers);
+    const pollOnFrame = () => {
+      pollBuffers();
+      animationFrameId = requestAnimationFrame(pollOnFrame);
     };
 
     // B. If in mock mode, generate synthetic brain wave data at 256Hz
@@ -266,11 +365,14 @@ function App() {
       }, 1000 / SAMPLE_RATE);
     }
 
-    // Start draining buffers
-    pollBuffers();
+    // Start draining buffers. The animation frame keeps the waveform smooth
+    // while visible; the interval is what guarantees the buffers get emptied
+    // even when the tab is hidden and rAF has stopped firing.
+    pollOnFrame();
+    const drainInterval = window.setInterval(pollBuffers, DRAIN_INTERVAL_MS);
 
     // C. DSP Calculations: FFT + Band Powers (Runs at 4Hz / every 250ms)
-    dspInterval = window.setInterval(() => {
+    const dspInterval = window.setInterval(() => {
       // 1. Calculate Signal Quality (standard deviation over the last 128 samples)
       const qualities = eegBuffersRef.current.map((rawData) => {
         if (rawData.length < 128) return 'disconnected';
@@ -301,6 +403,15 @@ function App() {
         const spectrum = calculatePowerSpectrum(sanitized);
         const powers = powerByBand(spectrum);
         channelPowers.push(powers);
+
+        // Per-channel band powers are computed here and were previously thrown
+        // away, keeping only their average. They are the most useful derived
+        // signal after the raw trace, and free to record.
+        if (recordingRef.current) {
+          rawQueueRef.current.bands.push([
+            ch, powers.delta, powers.theta, powers.alpha, powers.beta, powers.gamma,
+          ]);
+        }
       }
 
       // Average band powers across all 4 channels
@@ -338,7 +449,7 @@ function App() {
     }, 250);
 
     // D. WebSocket Streaming: Send updates to Pi at 30Hz
-    wsStreamInterval = window.setInterval(() => {
+    const wsStreamInterval = window.setInterval(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
         // Calculate dynamic drive normalized score based on current focus
         let drive = (focusScore - baseline) / halfRange;
@@ -357,11 +468,48 @@ function App() {
       }
     }, 1000 / 30);
 
+    // E. Raw capture: ship accumulated samples in batches while recording.
+    const rawSendInterval = window.setInterval(() => {
+      const socket = wsRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+
+      const queue = rawQueueRef.current;
+      const overflows = overflowsRef.current;
+      const hasSamples =
+        queue.eeg.length || queue.ppg.length || queue.acc.length ||
+        queue.gyro.length || queue.bands.length;
+
+      if (!recordingRef.current) {
+        // Not recording: discard rather than accumulate, or the first session
+        // would open with a flood of samples predating it.
+        if (hasSamples) rawQueueRef.current = emptyRawQueue();
+        overflowsRef.current = {};
+        return;
+      }
+      if (!hasSamples && !Object.keys(overflows).length) return;
+
+      // Swap before sending so samples arriving mid-send are not lost.
+      rawQueueRef.current = emptyRawQueue();
+      overflowsRef.current = {};
+
+      socket.send(JSON.stringify({
+        type: 'raw',
+        eeg: queue.eeg,
+        ppg: queue.ppg,
+        acc: queue.acc,
+        gyro: queue.gyro,
+        bands: queue.bands,
+        overflows,
+      }));
+    }, 1000 / RAW_SEND_HZ);
+
     return () => {
       cancelAnimationFrame(animationFrameId);
       clearInterval(dspInterval);
       clearInterval(wsStreamInterval);
       clearInterval(mockDataGeneratorInterval);
+      clearInterval(drainInterval);
+      clearInterval(rawSendInterval);
     };
   }, [isConnected, museDevice, isMock, focusScore, baseline, halfRange, playerId, calState]);
 
@@ -600,6 +748,25 @@ function App() {
         </div>
 
         <div className="flex items-center gap-4">
+          {serverRecording && (
+            <div
+              className="flex items-center"
+              style={{
+                fontSize: '0.8rem',
+                fontWeight: 700,
+                color: 'var(--danger)',
+                background: 'rgba(239, 68, 68, 0.1)',
+                border: '1px solid var(--danger)',
+                padding: '5px 12px',
+                borderRadius: '20px',
+                gap: '7px',
+              }}
+              title="A session is recording. Your raw EEG is being saved."
+            >
+              <span className="rec-pip" />
+              RECORDING
+            </div>
+          )}
           <div className="flex items-center" style={{ fontSize: '0.9rem' }}>
             <span className={`status-dot ${wsStatus === 'connected' ? 'active' : wsStatus === 'connecting' ? 'warning' : 'inactive'}`} />
             <span style={{ textTransform: 'capitalize' }}>Pi Socket: {wsStatus}</span>

@@ -46,6 +46,9 @@ STALE_AFTER_S = 3.0
 # Window over which each seat's arrival rate is measured.
 RATE_WINDOW_S = 2.0
 
+# How often buffered recording data is pushed to the OS.
+FLUSH_EVERY_S = 2.0
+
 # Browsers throttle timers in hidden tabs to roughly 1 Hz, so a phone that
 # locks its screen silently drops from 30 Hz to 1 Hz while still looking
 # connected. Anything this slow is reported as throttled rather than healthy.
@@ -72,6 +75,23 @@ IGNORED = "ignored"
 ADDR_TELEMETRY = "/pwa/telemetry"
 ADDR_CALIBRATION = "/pwa/calibration"
 ADDR_SEAT = "/pwa/seat"
+
+# Raw streams the client may include in a batch, with the nominal sample rate
+# used to space samples within that batch and the expected values per sample.
+# A stream absent from a batch is normal: the MU-02 has no PPG hardware.
+RAW_STREAMS = {
+    "eeg": {"address": "/pwa/eeg", "rate": 256.0, "width": 4},
+    "ppg": {"address": "/pwa/ppg", "rate": 64.0, "width": 3},
+    "acc": {"address": "/pwa/acc", "rate": 52.0, "width": 3},
+    "gyro": {"address": "/pwa/gyro", "rate": 52.0, "width": 3},
+}
+
+# Band powers arrive as one row per channel and carry their own channel index,
+# so they are not spaced like a sampled stream.
+ADDR_BANDS = "/pwa/bands"
+BANDS_WIDTH = 6  # channel + five band powers
+
+RAW = "raw"
 
 
 def make_seat_ids(count):
@@ -102,6 +122,10 @@ class PlayerHub:
         self._clock = clock or time.monotonic
         self._last_seen = {sid: None for sid in self.seat_ids}
         self._arrivals = {sid: deque() for sid in self.seat_ids}
+        # Times a client buffer filled and discarded samples, per seat, this session.
+        # The buffer drops incoming samples when full, so the count of lost
+        # samples is unknowable — only that loss happened.
+        self._overflows = {sid: 0 for sid in self.seat_ids}
 
     # -- seats ---------------------------------------------------------------
 
@@ -147,6 +171,9 @@ class PlayerHub:
         if not isinstance(data, dict):
             return IGNORED
 
+        if data.get("type") == RAW:
+            return self._handle_raw(seat_id, data)
+
         if data.get("event") == "calibration_complete":
             # Worth recording: a normalized score cannot be interpreted later
             # without the baseline and half-range it was derived from.
@@ -189,6 +216,18 @@ class PlayerHub:
     def occupied_seats(self):
         return tuple(sorted(self._sockets))
 
+    @property
+    def player_sockets(self):
+        return tuple(self._sockets.values())
+
+    def recording_message(self):
+        """Told to players so they only stream raw while a session is running.
+
+        Raw capture costs phone battery and CPU, and most of the time nobody is
+        recording, so clients stay quiet until asked.
+        """
+        return {"type": "recording", "active": self.recording, "label": self._label}
+
     # -- observers -----------------------------------------------------------
 
     def add_observer(self, socket):
@@ -211,6 +250,8 @@ class PlayerHub:
         if self._recorder is None:
             return None
         self._label = label
+        # Drop counts describe one session, not the process lifetime.
+        self._overflows = {sid: 0 for sid in self.seat_ids}
         directory = self._recorder.start(label, extra_meta={"source": "pwa-websocket"})
         # Seats already occupied would otherwise have no connect event in the
         # recording, leaving their telemetry apparently unexplained.
@@ -223,14 +264,79 @@ class PlayerHub:
             return None
         return self._recorder.stop()
 
-    def _record(self, address, values):
+    def _record(self, address, values, t=None):
         """Best-effort recording. Never let it break a player connection."""
         if self._recorder is None or not self._recorder.active:
             return
         try:
-            self._recorder.record(address, values)
+            self._recorder.record(address, values, t=t)
         except Exception:
             logger.exception("recording %s failed", address)
+
+    def flush_recorder(self):
+        if self._recorder is None or not self._recorder.active:
+            return
+        try:
+            self._recorder.flush()
+        except Exception:
+            logger.exception("flushing the recording failed")
+
+    # -- raw capture ---------------------------------------------------------
+
+    def _handle_raw(self, seat_id, data):
+        """Record one batch of raw samples.
+
+        Batches carry no per-sample timestamps, so each is back-dated from its
+        arrival: N samples at rate R ending now means sample i sits at
+        now - (N-1-i)/R. Spacing inside a batch is then exact, and the error
+        between batches is network latency — a few ms against EEG's 3.9 ms
+        sample interval.
+        """
+        if not self.recording:
+            # Nothing to write to. Not an error: a client may still be finishing
+            # a batch as a session stops.
+            return RAW
+
+        arrival = self._recorder_now()
+        overflows = data.get("overflows")
+        if isinstance(overflows, dict):
+            for stream, count in overflows.items():
+                try:
+                    self._overflows[seat_id] += max(0, int(count))
+                except (TypeError, ValueError):
+                    continue
+
+        for name, spec in RAW_STREAMS.items():
+            samples = data.get(name)
+            if not isinstance(samples, list) or not samples:
+                continue
+            self._record_sampled(seat_id, samples, spec, arrival)
+
+        bands = data.get("bands")
+        if isinstance(bands, list):
+            for row in bands:
+                if isinstance(row, list) and len(row) == BANDS_WIDTH:
+                    self._record(ADDR_BANDS, [seat_id] + list(row), t=arrival)
+
+        return RAW
+
+    def _record_sampled(self, seat_id, samples, spec, arrival):
+        count = len(samples)
+        step = 1.0 / spec["rate"]
+        for index, sample in enumerate(samples):
+            if not isinstance(sample, list) or len(sample) != spec["width"]:
+                continue
+            t = arrival - (count - 1 - index) * step
+            self._record(spec["address"], [seat_id] + list(sample), t=t)
+
+    def _recorder_now(self):
+        """Session-relative time, matching what SessionRecorder would stamp."""
+        if self._recorder is None:
+            return 0.0
+        return self._recorder.elapsed()
+
+    def overflows_for(self, seat_id):
+        return self._overflows.get(seat_id, 0)
 
     # -- snapshot ------------------------------------------------------------
 
@@ -300,6 +406,7 @@ class PlayerHub:
                     stale=self.is_stale(sid),
                     rate=round(self.rate_of(sid), 1),
                     throttled=self.is_throttled(sid),
+                    overflows=self.overflows_for(sid),
                 )
                 for sid in self.seat_ids
             ],
@@ -337,6 +444,16 @@ def build_ssl_context(cert_path, key_path):
 # -- handlers ----------------------------------------------------------------
 
 
+async def _announce_recording(hub):
+    """Tell every connected player whether a session is running."""
+    payload = json.dumps(hub.recording_message())
+    for socket in hub.player_sockets:
+        # A player that has gone away is the disconnect path's problem, not this
+        # one's; failing here must not abort telling everybody else.
+        with contextlib.suppress(Exception):
+            await socket.send_str(payload)
+
+
 async def handle_health(request):
     return web.json_response(request.app[HUB].snapshot())
 
@@ -358,6 +475,7 @@ async def handle_session_start(request):
         raise web.HTTPServiceUnavailable(text="No recorder is configured")
 
     logger.info("Recording started: %s", directory)
+    await _announce_recording(hub)
     return web.json_response({"active": True, "label": label, "dir": str(directory)})
 
 
@@ -365,6 +483,7 @@ async def handle_session_stop(request):
     hub = request.app[HUB]
     directory = hub.stop_recording()
     logger.info("Recording stopped: %s", directory)
+    await _announce_recording(hub)
     return web.json_response({"active": False, "dir": str(directory) if directory else None})
 
 
@@ -415,6 +534,12 @@ async def handle_player(request):
 
     logger.info("Seat %s connected from %s", seat_id, request.remote)
 
+    # Announce on connect as well as on change: a phone joining mid-session
+    # would otherwise stay silent until the next start, and its data would be
+    # missing from a recording that looked complete.
+    with contextlib.suppress(Exception):
+        await socket.send_str(json.dumps(hub.recording_message()))
+
     try:
         async for message in socket:
             if message.type is WSMsgType.ERROR:
@@ -458,9 +583,18 @@ def _no_cache_file(filename):
 async def _broadcast_loop(app):
     hub = app[HUB]
     interval = 1.0 / OBSERVER_HZ
+    ticks_per_flush = max(1, int(FLUSH_EVERY_S * OBSERVER_HZ))
+    tick = 0
 
     while True:
         await asyncio.sleep(interval)
+
+        # Raw capture writes through a 64 KB buffer, so an unclean shutdown
+        # costs whatever is unflushed. Bounding that to a couple of seconds
+        # matters for a Pi running off a battery.
+        tick += 1
+        if tick % ticks_per_flush == 0:
+            hub.flush_recorder()
 
         observers = tuple(hub.observers)
         if not observers:

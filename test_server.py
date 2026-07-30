@@ -2,6 +2,7 @@ import asyncio
 import csv
 import functools
 import json
+import pathlib
 import ssl
 import subprocess
 
@@ -303,6 +304,8 @@ class TestPlayerHub:
             # A single arrival gives no interval to measure, and a stale seat
             # is never also reported as throttled.
             "rate": 0.0, "throttled": False,
+            # No raw batches have arrived, so nothing has been lost.
+            "overflows": 0,
         }
         assert seats["p2"]["stale"] is False
 
@@ -311,6 +314,165 @@ class TestPlayerHub:
         snapshot = hub.snapshot()
         snapshot["seats"][0]["raw"] = 99.0
         assert hub.state_of("p1")["raw"] == 0.0
+
+
+def _raw_batch(**streams):
+    return json.dumps(dict(type="raw", **streams))
+
+
+class TestRawCapture:
+    def test_eeg_samples_are_written_one_row_per_sample(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("raw")
+        hub.handle_message(
+            "p1",
+            _raw_batch(eeg=[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]]),
+        )
+        hub.stop_recording()
+
+        rows = _read_csv(session / "eeg.csv")
+        assert rows[0] == ["t", "seat", "TP9", "AF7", "AF8", "TP10"]
+        assert [r[1:] for r in rows[1:]] == [
+            ["p1", "1.0", "2.0", "3.0", "4.0"],
+            ["p1", "5.0", "6.0", "7.0", "8.0"],
+        ]
+
+    def test_samples_in_a_batch_are_spaced_by_the_sample_rate(self, recorder):
+        # A batch carries no per-sample timestamps, so they are back-dated from
+        # arrival. Spacing within the batch must be exact or the signal is
+        # time-warped.
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("spacing")
+        hub.handle_message("p1", _raw_batch(eeg=[[i, 0, 0, 0] for i in range(4)]))
+        hub.stop_recording()
+
+        times = [float(r[0]) for r in _read_csv(session / "eeg.csv")[1:]]
+        gaps = [b - a for a, b in zip(times, times[1:])]
+        # Timestamps are stored to 6 decimals, so a 1 us quantisation against a
+        # 3906 us sample interval is expected and harmless.
+        assert gaps == pytest.approx([1 / 256] * 3, abs=2e-6)
+        assert times == sorted(times), "samples must be in chronological order"
+
+    def test_every_stream_lands_in_its_own_file(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("streams")
+        hub.handle_message(
+            "p2",
+            _raw_batch(
+                eeg=[[1, 2, 3, 4]],
+                ppg=[[10, 11, 12]],
+                acc=[[0.1, 0.2, 0.3]],
+                gyro=[[1.5, 2.5, 3.5]],
+                bands=[[0, 1, 2, 3, 4, 5]],
+            ),
+        )
+        hub.stop_recording()
+
+        assert _read_csv(session / "ppg.csv")[0] == ["t", "seat", "ppg1", "ppg2", "ppg3"]
+        assert _read_csv(session / "acc.csv")[1][1:] == ["p2", "0.1", "0.2", "0.3"]
+        assert _read_csv(session / "gyro.csv")[1][1:] == ["p2", "1.5", "2.5", "3.5"]
+        bands = _read_csv(session / "bands.csv")
+        assert bands[0] == ["t", "seat", "channel", "delta", "theta", "alpha", "beta", "gamma"]
+        assert bands[1][1:] == ["p2", "0", "1", "2", "3", "4", "5"]
+
+    def test_a_headset_without_ppg_is_not_an_error(self, recorder):
+        # The MU-02 has no PPG hardware, so its batches simply omit the stream.
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("mu02")
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]], acc=[[0, 0, 0]]))
+        hub.stop_recording()
+
+        assert (session / "eeg.csv").exists()
+        assert not (session / "ppg.csv").exists()
+        meta = json.loads((session / "meta.json").read_text())
+        assert meta["errors"] == 0
+
+    @pytest.mark.parametrize(
+        "batch",
+        [
+            _raw_batch(eeg="not a list"),
+            _raw_batch(eeg=[[1, 2]]),           # wrong width
+            _raw_batch(eeg=[]),                  # empty
+            _raw_batch(unknown_stream=[[1, 2]]),  # a newer client
+            _raw_batch(bands=[[1, 2]]),          # wrong band width
+        ],
+    )
+    def test_malformed_batches_are_ignored_without_erroring(self, recorder, batch):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("malformed")
+        hub.handle_message("p1", batch)
+        hub.stop_recording()
+
+        meta = json.loads((session / "meta.json").read_text())
+        assert meta["errors"] == 0
+        assert "eeg.csv" not in meta["streams"] or meta["streams"]["eeg.csv"] == 0
+
+    def test_raw_is_discarded_when_no_session_is_recording(self, recorder):
+        # Clients should not be streaming, but a batch in flight as a session
+        # stops must not become an error or a stray file.
+        hub = PlayerHub(recorder=recorder)
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]]))
+        assert hub.recording is False
+        assert not recorder.base_dir.exists() or not list(recorder.base_dir.iterdir())
+
+    def test_overflow_counts_accumulate_and_reach_the_snapshot(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        hub.start_recording("drops")
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]], overflows={"eeg": 12}))
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]], overflows={"eeg": 5, "ppg": 2}))
+        hub.stop_recording()
+
+        assert hub.overflows_for("p1") == 19
+        seats = {s["id"]: s for s in hub.snapshot()["seats"]}
+        assert seats["p1"]["overflows"] == 19
+        assert seats["p2"]["overflows"] == 0
+
+    def test_overflow_counts_reset_between_sessions(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        hub.start_recording("first")
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]], overflows={"eeg": 7}))
+        hub.stop_recording()
+        assert hub.overflows_for("p1") == 7
+
+        hub.start_recording("second")
+        assert hub.overflows_for("p1") == 0, "drops describe one session"
+        hub.stop_recording()
+
+    def test_nonsense_overflow_values_are_ignored(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        hub.start_recording("bad-drops")
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]], overflows="lots"))
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]], overflows={"eeg": "many"}))
+        hub.stop_recording()
+        assert hub.overflows_for("p1") == 0
+
+    def test_raw_does_not_disturb_the_focus_score(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        hub.start_recording("mixed")
+        hub.handle_message("p1", json.dumps({"rawScore": 2.0, "normalizedScore": 0.5}))
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]]))
+        hub.stop_recording()
+
+        assert hub.state_of("p1") == {"raw": 2.0, "normalized": 0.5, "calibrating": False}
+
+    def test_recording_message_reflects_session_state(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        assert hub.recording_message() == {"type": "recording", "active": False, "label": ""}
+        hub.start_recording("live-one")
+        assert hub.recording_message() == {
+            "type": "recording", "active": True, "label": "live-one",
+        }
+        hub.stop_recording()
+        assert hub.recording_message()["active"] is False
+
+    def test_flush_is_safe_with_no_session(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        hub.flush_recorder()  # must not raise
+        hub.start_recording("flushing")
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]]))
+        hub.flush_recorder()
+        assert hub.recording is True
+        hub.stop_recording()
 
 
 class TestRecording:
@@ -329,7 +491,7 @@ class TestRecording:
         hub.stop_recording()
 
         rows = _read_csv(session / "telemetry.csv")
-        assert rows[0] == ["t", "seat", "raw", "normalized", "calibrating"]
+        assert rows[0] == ["t", "seat", "focus_score", "normalized", "calibrating"]
         assert [r[1] for r in rows[1:]] == ["p1", "p3"]
         assert rows[1][2:] == ["1.0", "0.5", "0"]
 
@@ -522,7 +684,14 @@ class TestApp:
 
             # The server closes the older socket rather than refusing the new
             # one, so a phone waking from sleep can always get its seat back.
-            assert (await first.receive()).type.name in {"CLOSE", "CLOSED", "CLOSING"}
+            # The server also pushes recording state on connect, so skip past
+            # any data frames to find the close.
+            for _ in range(5):
+                msg = await first.receive()
+                if msg.type.name in {"CLOSE", "CLOSED", "CLOSING"}:
+                    break
+            else:
+                pytest.fail("displaced socket was never closed")
             assert hub.occupied_seats == ("p1",)
 
             await second.send_json({"rawScore": 3.0, "normalizedScore": 0.75})
@@ -634,6 +803,70 @@ class TestObserver:
                 await observer.close()
             await _settle()
             assert len(hub.observers) == 0
+
+
+class TestRawOverTheWire:
+    @async_test
+    async def test_a_player_is_told_the_session_state_on_connect(self, static_dir, recorder):
+        # A phone joining mid-session must start streaming immediately, or its
+        # data is missing from a recording that looks complete.
+        hub = PlayerHub(seat_ids=make_seat_ids(2), recorder=recorder)
+        app = create_app(static_dir=static_dir, hub=hub)
+        async with TestClient(TestServer(app)) as client:
+            await client.post("/api/session/start", json={"label": "already-going"})
+            async with client.ws_connect("/ws/p1") as socket:
+                msg = json.loads((await socket.receive()).data)
+                assert msg == {
+                    "type": "recording", "active": True, "label": "already-going",
+                }
+            await client.post("/api/session/stop")
+
+    @async_test
+    async def test_players_are_told_when_a_session_starts_and_stops(self, static_dir, recorder):
+        hub = PlayerHub(seat_ids=make_seat_ids(2), recorder=recorder)
+        app = create_app(static_dir=static_dir, hub=hub)
+        async with TestClient(TestServer(app)) as client:
+            async with client.ws_connect("/ws/p1") as socket:
+                first = json.loads((await socket.receive()).data)
+                assert first["active"] is False
+
+                await client.post("/api/session/start", json={"label": "go"})
+                started = json.loads((await socket.receive()).data)
+                assert started == {"type": "recording", "active": True, "label": "go"}
+
+                await client.post("/api/session/stop")
+                stopped = json.loads((await socket.receive()).data)
+                assert stopped["active"] is False
+
+    @async_test
+    async def test_a_raw_batch_reaches_disk_over_a_websocket(self, static_dir, recorder):
+        hub = PlayerHub(seat_ids=make_seat_ids(2), recorder=recorder)
+        app = create_app(static_dir=static_dir, hub=hub)
+        async with TestClient(TestServer(app)) as client:
+            started = await (
+                await client.post("/api/session/start", json={"label": "wire"})
+            ).json()
+
+            async with client.ws_connect("/ws/p2") as socket:
+                await socket.receive()  # recording announcement
+                await socket.send_str(
+                    _raw_batch(
+                        eeg=[[1.0, 2.0, 3.0, 4.0], [5.0, 6.0, 7.0, 8.0]],
+                        acc=[[0.0, 0.0, 1.0]],
+                        overflows={"eeg": 3},
+                    )
+                )
+                await _settle(0.2)
+
+            await client.post("/api/session/stop")
+
+        session = pathlib.Path(started["dir"])
+        eeg = _read_csv(session / "eeg.csv")
+        assert [r[1] for r in eeg[1:]] == ["p2", "p2"]
+        assert _read_csv(session / "acc.csv")[1][1:] == ["p2", "0.0", "0.0", "1.0"]
+        assert hub.overflows_for("p2") == 3
+        meta = json.loads((session / "meta.json").read_text())
+        assert meta["errors"] == 0
 
 
 class TestSessionControl:

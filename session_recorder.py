@@ -28,10 +28,22 @@ class SessionRecorder:
         "/muse/acc":  ("acc.csv",  ["x", "y", "z"]),
         "/muse/ppg":  ("ppg.csv",  ["ppg1", "ppg2", "ppg3"]),
 
-        "/pwa/telemetry":   ("telemetry.csv",   ["seat", "raw", "normalized", "calibrating"]),
+        "/pwa/telemetry":   ("telemetry.csv",   ["seat", "focus_score", "normalized", "calibrating"]),
         "/pwa/calibration": ("calibration.csv", ["seat", "baseline", "half_range"]),
         "/pwa/seat":        ("seats.csv",       ["seat", "event"]),
+
+        # Raw signal straight off the headset, one row per sample.
+        "/pwa/eeg":   ("eeg.csv",   ["seat", "TP9", "AF7", "AF8", "TP10"]),
+        "/pwa/ppg":   ("ppg.csv",   ["seat", "ppg1", "ppg2", "ppg3"]),
+        "/pwa/acc":   ("acc.csv",   ["seat", "x", "y", "z"]),
+        "/pwa/gyro":  ("gyro.csv",  ["seat", "x", "y", "z"]),
+        "/pwa/bands": ("bands.csv", ["seat", "channel", "delta", "theta", "alpha", "beta", "gamma"]),
     }
+
+    # Raw capture writes ~1100 rows/sec across three seats. Line buffering would
+    # mean a write syscall per row; a real buffer plus periodic flush costs a
+    # couple of seconds of data on a crash instead of a syscall per sample.
+    WRITE_BUFFER_BYTES = 1 << 16
 
     def __init__(self, base_dir="recordings", now_fn=None, clock_fn=None):
         self.base_dir = Path(base_dir)
@@ -111,10 +123,36 @@ class SessionRecorder:
             return "elements.csv", ["addr", "v0", "v1", "v2", "v3"], [addr] + vals
         return "other.csv", ["addr", "values"], [addr, "|".join(str(a) for a in args)]
 
+    def elapsed(self):
+        """Seconds since the session started, on the same clock `record` stamps.
+
+        Lets a caller time-stamp samples itself, which batched raw capture needs:
+        the samples in a batch did not all arrive at the moment it was received.
+        """
+        with self._lock:
+            if not self.active:
+                return 0.0
+            return self._clock() - self._t0
+
+    def flush(self):
+        """Push buffered rows to the OS.
+
+        Called periodically by the server so an unclean shutdown — a crash, or a
+        battery giving out in the desert — costs seconds rather than the session.
+        """
+        with self._lock:
+            for f in self._files.values():
+                try:
+                    f.flush()
+                except Exception:
+                    self._errors += 1
+
     def _writer_for(self, fname, cols):
         writer = self._writers.get(fname)
         if writer is None:
-            f = open(self._session_dir / fname, "w", newline="", buffering=1)
+            f = open(
+                self._session_dir / fname, "w", newline="", buffering=self.WRITE_BUFFER_BYTES
+            )
             self._files[fname] = f
             writer = csv.writer(f)
             writer.writerow(["t"] + cols)
