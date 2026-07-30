@@ -51,9 +51,16 @@ RATE_WINDOW_S = 2.0
 # connected. Anything this slow is reported as throttled rather than healthy.
 THROTTLED_BELOW_HZ = 5.0
 
+# Where a plain-HTTP request gets bounced to HTTPS. Browsers do not upgrade
+# bare addresses, and people type hostnames without a scheme, so without this
+# the first thing a new device sees is a connection refused.
+DEFAULT_REDIRECT_PORT = 80
+
 HUB = web.AppKey("hub")
 STATIC_DIR = web.AppKey("static_dir", Path)
 BROADCAST_TASK = web.AppKey("broadcast_task")
+REDIRECT_CONFIG = web.AppKey("redirect_config")
+REDIRECT_RUNNER = web.AppKey("redirect_runner")
 
 # Outcomes of handling one websocket frame.
 TELEMETRY = "telemetry"
@@ -471,6 +478,53 @@ async def _broadcast_loop(app):
                 hub.remove_observer(observer)
 
 
+def make_redirect_app(https_port=443):
+    """A tiny app whose only job is to bounce plain HTTP over to HTTPS.
+
+    Kept separate from the main app so it can be served on its own port and
+    tested on its own. A temporary redirect rather than permanent: a permanent
+    one gets cached hard by every phone that ever hits it, which is awkward to
+    undo on someone else's device in a desert.
+    """
+
+    async def redirect(request):
+        host = request.host.split(":")[0]
+        target = f"https://{host}"
+        if https_port != 443:
+            target += f":{https_port}"
+        target += str(request.rel_url)
+        raise web.HTTPFound(target)
+
+    app = web.Application()
+    app.router.add_route("*", "/{tail:.*}", redirect)
+    return app
+
+
+async def _start_redirect(app):
+    config = app.get(REDIRECT_CONFIG)
+    if not config:
+        return
+    host, port, https_port = config
+
+    runner = web.AppRunner(make_redirect_app(https_port))
+    await runner.setup()
+    try:
+        await web.TCPSite(runner, host, port).start()
+    except OSError as exc:
+        # Losing the convenience redirect is not worth refusing to serve.
+        logger.warning("HTTP redirect on port %s unavailable: %s", port, exc)
+        await runner.cleanup()
+        return
+    app[REDIRECT_RUNNER] = runner
+    logger.info("Redirecting http://%s:%s to https", host, port)
+
+
+async def _stop_redirect(app):
+    runner = app.get(REDIRECT_RUNNER)
+    if runner is not None:
+        await runner.cleanup()
+
+
 async def _start_broadcast(app):
     app[BROADCAST_TASK] = asyncio.create_task(_broadcast_loop(app))
 
@@ -510,7 +564,9 @@ def create_app(static_dir=DEFAULT_STATIC_DIR, hub=None, recorder=None):
         app.router.add_static("/", app[STATIC_DIR])
 
     app.on_startup.append(_start_broadcast)
+    app.on_startup.append(_start_redirect)
     app.on_cleanup.append(_stop_broadcast)
+    app.on_cleanup.append(_stop_redirect)
     return app
 
 
@@ -537,6 +593,12 @@ def parse_args(argv=None):
         "--recordings-dir",
         type=Path,
         default=Path(os.environ.get("MUSE_RECORDINGS_DIR", DEFAULT_RECORDINGS_DIR)),
+    )
+    parser.add_argument(
+        "--redirect-port",
+        type=int,
+        default=int(os.environ.get("MUSE_REDIRECT_PORT", DEFAULT_REDIRECT_PORT)),
+        help="plain-HTTP port that redirects to HTTPS; 0 disables",
     )
     return parser.parse_args(argv)
 
@@ -573,8 +635,15 @@ def main(argv=None):
         ", ".join(hub.seat_ids),
     )
 
+    app = create_app(static_dir=args.static_dir, hub=hub)
+
+    # Only meaningful when actually serving TLS; without a certificate there is
+    # nothing to redirect anyone to.
+    if ssl_context is not None and args.redirect_port:
+        app[REDIRECT_CONFIG] = (args.host, args.redirect_port, args.port)
+
     web.run_app(
-        create_app(static_dir=args.static_dir, hub=hub),
+        app,
         host=args.host,
         port=args.port,
         ssl_context=ssl_context,
