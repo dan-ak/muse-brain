@@ -87,11 +87,28 @@ RAW_STREAMS = {
 }
 
 # Band powers arrive as one row per channel and carry their own channel index,
-# so they are not spaced like a sampled stream.
+# so they are grouped into DSP ticks rather than spaced per row.
 ADDR_BANDS = "/pwa/bands"
 BANDS_WIDTH = 6  # channel + five band powers
+BANDS_HZ = 4.0  # the client's DSP interval
+
+# Marks a discontinuity where the client reported losing samples, so a dropout
+# is visible in the recording itself rather than only in a live counter.
+ADDR_GAP = "/pwa/gap"
 
 RAW = "raw"
+
+
+def _is_finite_number(value):
+    """True for a real, finite number — and notably False for bool and None.
+
+    JSON.stringify turns NaN and Infinity into null, and powerByBand can produce
+    either, so without this check nulls and strings were written straight into
+    numeric CSV columns while meta.json still reported zero errors.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and value not in (float("inf"), float("-inf"))
 
 
 def make_seat_ids(count):
@@ -126,6 +143,9 @@ class PlayerHub:
         # The buffer drops incoming samples when full, so the count of lost
         # samples is unknowable — only that loss happened.
         self._overflows = {sid: 0 for sid in self.seat_ids}
+        # Last timestamp written per (seat, stream), so a delayed batch cannot be
+        # back-dated to before rows already on disk.
+        self._last_sample_t = {}
 
     # -- seats ---------------------------------------------------------------
 
@@ -249,9 +269,18 @@ class PlayerHub:
     def start_recording(self, label):
         if self._recorder is None:
             return None
+
+        # Starting again while active is a no-op in SessionRecorder, which keeps
+        # its original directory. Mutating label and counters here anyway made
+        # the response, the announcement and meta.json disagree, and zeroed the
+        # loss counts for a session that had already logged some.
+        if self._recorder.active:
+            return self._recorder.session_dir
+
         self._label = label
-        # Drop counts describe one session, not the process lifetime.
+        # Overflow counts describe one session, not the process lifetime.
         self._overflows = {sid: 0 for sid in self.seat_ids}
+        self._last_sample_t = {}
         directory = self._recorder.start(label, extra_meta={"source": "pwa-websocket"})
         # Seats already occupied would otherwise have no connect event in the
         # recording, leaving their telemetry apparently unexplained.
@@ -298,36 +327,119 @@ class PlayerHub:
             return RAW
 
         arrival = self._recorder_now()
-        overflows = data.get("overflows")
-        if isinstance(overflows, dict):
-            for stream, count in overflows.items():
-                try:
-                    self._overflows[seat_id] += max(0, int(count))
-                except (TypeError, ValueError):
-                    continue
+        lost = self._note_overflows(seat_id, data.get("overflows"))
 
         for name, spec in RAW_STREAMS.items():
             samples = data.get(name)
             if not isinstance(samples, list) or not samples:
                 continue
-            self._record_sampled(seat_id, samples, spec, arrival)
+            self._record_sampled(seat_id, samples, spec, arrival, lost)
 
         bands = data.get("bands")
         if isinstance(bands, list):
-            for row in bands:
-                if isinstance(row, list) and len(row) == BANDS_WIDTH:
-                    self._record(ADDR_BANDS, [seat_id] + list(row), t=arrival)
+            self._record_bands(seat_id, bands, arrival)
 
         return RAW
 
-    def _record_sampled(self, seat_id, samples, spec, arrival):
-        count = len(samples)
-        step = 1.0 / spec["rate"]
-        for index, sample in enumerate(samples):
-            if not isinstance(sample, list) or len(sample) != spec["width"]:
+    def _note_overflows(self, seat_id, overflows):
+        """Accumulate reported buffer overflows. Returns whether any were new.
+
+        int() raises OverflowError on a float infinity, which json.loads accepts
+        as a bare Infinity literal — and OverflowError is not a subclass of
+        ValueError, so catching only those let it escape handle_message and tear
+        down the socket.
+        """
+        if not isinstance(overflows, dict):
+            return False
+
+        total = 0
+        for count in overflows.values():
+            try:
+                total += max(0, int(count))
+            except (TypeError, ValueError, OverflowError):
                 continue
-            t = arrival - (count - 1 - index) * step
+
+        self._overflows[seat_id] += total
+        return total > 0
+
+    def _record_sampled(self, seat_id, samples, spec, arrival, lost=False):
+        """Write one batch of samples, back-dated from arrival.
+
+        Timestamps are clamped to stay after the last row written for this
+        stream. Without that, a batch delayed by wifi power-save is back-dated
+        to before the batch already on disk, leaving a non-monotonic time column
+        that silently breaks anything assuming ordering.
+        """
+        rows = [
+            sample
+            for sample in samples
+            if isinstance(sample, list)
+            and len(sample) == spec["width"]
+            and all(_is_finite_number(v) for v in sample)
+        ]
+        if not rows:
+            return
+
+        step = 1.0 / spec["rate"]
+        first = arrival - (len(rows) - 1) * step
+
+        key = (seat_id, spec["address"])
+        previous = self._last_sample_t.get(key)
+        if previous is not None and first <= previous:
+            first = previous + step
+
+        for index, sample in enumerate(rows):
+            t = first + index * step
             self._record(spec["address"], [seat_id] + list(sample), t=t)
+        self._last_sample_t[key] = first + (len(rows) - 1) * step
+
+        # A batch that followed reported loss is not contiguous with the one
+        # before it, so mark the discontinuity rather than leaving the rows
+        # looking continuous. Without this the only trace of a dropout is a
+        # counter in memory that never reaches disk.
+        if lost:
+            self._record(ADDR_GAP, [seat_id, spec["address"], f"{first:.6f}"])
+
+    def _record_bands(self, seat_id, bands, arrival):
+        """Write band-power rows, spacing successive DSP windows apart.
+
+        Rows arrive four at a time (one per channel) per 250 ms DSP tick. A
+        delayed send carries several ticks, and stamping them all with `arrival`
+        collapsed distinct windows onto one timestamp — so anything pivoting on
+        (t, channel) silently kept one window and discarded the rest.
+        """
+        valid = [
+            row
+            for row in bands
+            if isinstance(row, list)
+            and len(row) == BANDS_WIDTH
+            and all(_is_finite_number(v) for v in row)
+        ]
+        if not valid:
+            return
+
+        # Group consecutive rows into ticks by watching the channel index restart.
+        ticks, current = [], []
+        for row in valid:
+            if current and row[0] <= current[-1][0]:
+                ticks.append(current)
+                current = []
+            current.append(row)
+        if current:
+            ticks.append(current)
+
+        step = 1.0 / BANDS_HZ
+        first = arrival - (len(ticks) - 1) * step
+        key = (seat_id, ADDR_BANDS)
+        previous = self._last_sample_t.get(key)
+        if previous is not None and first <= previous:
+            first = previous + step
+
+        for index, tick in enumerate(ticks):
+            t = first + index * step
+            for row in tick:
+                self._record(ADDR_BANDS, [seat_id] + list(row), t=t)
+        self._last_sample_t[key] = first + (len(ticks) - 1) * step
 
     def _recorder_now(self):
         """Session-relative time, matching what SessionRecorder would stamp."""

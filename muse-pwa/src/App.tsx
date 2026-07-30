@@ -29,8 +29,18 @@ const SEAT_TAKEN_CODE = 1001;
 // incoming samples rather than overwriting old ones. Draining on a timer rather
 // than requestAnimationFrame matters: rAF stops entirely in a hidden tab, so a
 // locked screen would lose raw samples outright instead of merely slowing down.
-const DRAIN_INTERVAL_MS = 100;
+// 30 ms rather than 100 gives real headroom against the buffer: a hidden tab
+// clamps timers to about 1 Hz, and 100 ms was already exactly the buffer's one
+// second of EEG, so the "guarantees the buffers get emptied" claim did not hold
+// the moment a screen locked.
+const DRAIN_INTERVAL_MS = 30;
 const RAW_SEND_HZ = 10;
+
+// Ceiling on queued rows per stream. aiohttp refuses websocket messages over
+// 4 MiB, so an unbounded queue during a disconnect turns into one oversized
+// batch that kills the socket and loses everything. Two seconds of EEG is far
+// more than a healthy send cycle needs.
+const MAX_QUEUED_ROWS = 512;
 
 type RawQueue = {
   eeg: number[][];
@@ -41,6 +51,20 @@ type RawQueue = {
 };
 
 const emptyRawQueue = (): RawQueue => ({ eeg: [], ppg: [], acc: [], gyro: [], bands: [] });
+
+/** Append rows, dropping the oldest past the cap and reporting what was lost.
+ *
+ * Bounding here rather than letting the queue grow is what keeps a disconnect
+ * from becoming an oversized batch on reconnect. Dropping the oldest keeps the
+ * most recent signal, and the loss is reported so it is never silent.
+ */
+const pushCapped = (queue: number[][], rows: number[][]): number => {
+  queue.push(...rows);
+  const excess = queue.length - MAX_QUEUED_ROWS;
+  if (excess <= 0) return 0;
+  queue.splice(0, excess);
+  return excess;
+};
 
 function App() {
   // Device & Connection State
@@ -88,6 +112,19 @@ function App() {
   // because the streaming effect rebuilds often and must not lose samples.
   const rawQueueRef = useRef<RawQueue>(emptyRawQueue());
   const overflowsRef = useRef<Record<string, number>>({});
+  // Last drain time per stream, used to prove sample loss from elapsed time.
+  const lastDrainRef = useRef<Record<string, number>>({});
+
+  // The data loop reads these through refs rather than listing them as effect
+  // dependencies. focusScore changes at 4 Hz, so depending on it tore down and
+  // rebuilt the whole loop — including the drain interval that raw capture
+  // relies on — four times a second, and reset the mock generator's phase with
+  // it. The loop should outlive a changing reading.
+  const focusScoreRef = useRef(0);
+  const baselineRef = useRef(0);
+  const halfRangeRef = useRef(1);
+  const calStateRef = useRef<'idle' | 'relax' | 'focus' | 'done'>('idle');
+  const playerIdRef = useRef('p1');
   // Read by the data loop, so a ref: reading state there would capture a stale
   // value from whichever render created the closure.
   const recordingRef = useRef(false);
@@ -95,6 +132,13 @@ function App() {
 
   // Canvas Reference
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  // Keep the data loop's refs in step with the state the UI renders from.
+  useEffect(() => { focusScoreRef.current = focusScore; }, [focusScore]);
+  useEffect(() => { baselineRef.current = baseline; }, [baseline]);
+  useEffect(() => { halfRangeRef.current = halfRange; }, [halfRange]);
+  useEffect(() => { calStateRef.current = calState; }, [calState]);
+  useEffect(() => { playerIdRef.current = playerId; }, [playerId]);
 
   // 0. Learn which seats this server offers.
   useEffect(() => {
@@ -166,6 +210,15 @@ function App() {
     let reconnectTimeout: number;
     let cancelled = false;
 
+    // Samples captured under the previous seat must never be shipped on this
+    // one: the server takes the seat from the socket's URL, not the payload, so
+    // a queue surviving a seat change writes one person's EEG under another's
+    // name — unrecoverable once on disk.
+    recordingRef.current = false;
+    rawQueueRef.current = emptyRawQueue();
+    overflowsRef.current = {};
+    lastDrainRef.current = {};
+
     const connectWS = () => {
       if (cancelled) return;
 
@@ -213,6 +266,17 @@ function App() {
         if (cancelled) return;
         setWsStatus('disconnected');
 
+        // Stop capturing the moment the link drops. The queue is bounded, but
+        // without this a disconnect mid-session keeps filling it and the first
+        // batch after reconnect is both oversized and misattributed in time.
+        // The server re-announces session state on connect, so this is restored
+        // automatically rather than needing to be remembered.
+        recordingRef.current = false;
+        setServerRecording(false);
+        rawQueueRef.current = emptyRawQueue();
+        overflowsRef.current = {};
+        lastDrainRef.current = {};
+
         // The server always hands a seat to the newest claimant, so that a
         // phone waking from sleep can reclaim it. Reconnecting here would take
         // the seat straight back, and two live devices on one seat would
@@ -255,23 +319,57 @@ function App() {
     let mockDataGeneratorInterval: number;
     let animationFrameId: number;
 
-    const noteOverflow = (stream: string) => {
-      overflowsRef.current[stream] = (overflowsRef.current[stream] ?? 0) + 1;
+    const noteLoss = (stream: string, samples: number) => {
+      if (samples <= 0) return;
+      overflowsRef.current[stream] = (overflowsRef.current[stream] ?? 0) + samples;
     };
 
-    /** Read one aligned row across parallel per-channel buffers, repeatedly. */
-    const drainAligned = (buffers: MuseCircularBuffer[] | undefined, width: number, stream: string) => {
+    /** Estimate samples lost since this stream was last drained.
+     *
+     * `isFull` is a false positive: the buffer sets it on the write that fills
+     * the last slot, before anything has been discarded, so a poll landing in
+     * that window reported loss for a complete recording. Elapsed time is
+     * provable instead — a gap longer than the buffer holds means the surplus
+     * was certainly discarded, and it yields a sample count rather than a count
+     * of times a flag happened to be set.
+     */
+    const estimateLoss = (stream: string, rate: number, capacity: number) => {
+      const now = performance.now();
+      const previous = lastDrainRef.current[stream];
+      lastDrainRef.current[stream] = now;
+      if (previous === undefined) return 0;
+      const gap = (now - previous) / 1000;
+      return Math.max(0, Math.round(gap * rate) - capacity);
+    };
+
+    /** Read aligned rows across parallel per-channel buffers.
+     *
+     * Reads the same count from every channel and leaves any excess in place
+     * rather than levelling with Math.min. Channels arrive in separate BLE
+     * notifications, so an overflow discards an unequal number from each, and
+     * dropping the surplus would permanently pair TP9[i] with AF7[i+k] — a file
+     * that looks well-formed while every cross-channel result is wrong.
+     */
+    const drainAligned = (
+      buffers: MuseCircularBuffer[] | undefined,
+      width: number,
+      stream: string,
+      rate: number,
+    ) => {
       const rows: number[][] = [];
       if (!buffers) return rows;
       const bufs = buffers.slice(0, width);
       if (bufs.length < width || bufs.some((b) => !b)) return rows;
 
-      // Check before reading: read() clears isFull, so afterwards the evidence
-      // that samples were discarded is gone.
-      if (bufs.some((b) => b.isFull)) noteOverflow(stream);
+      const lengths = bufs.map((b) => b.length);
+      const shortest = Math.min(...lengths);
+      const longest = Math.max(...lengths);
+      noteLoss(stream, estimateLoss(stream, rate, bufs[0].memory.length));
+      // Unequal fill means alignment is already lost for this stream; say so
+      // rather than silently re-pairing channels from here on.
+      if (longest > shortest) noteLoss(stream, longest - shortest);
 
-      const available = Math.min(...bufs.map((b) => b.length));
-      for (let i = 0; i < available; i++) {
+      for (let i = 0; i < shortest; i++) {
         const row: number[] = [];
         for (const b of bufs) {
           const sample = b.read();
@@ -292,8 +390,13 @@ function App() {
       }
 
       if (eegBufs.length === CHANNELS) {
-        if (eegBufs.some((b) => b.isFull)) noteOverflow('eeg');
-        const available = Math.min(...eegBufs.map((b) => b.length));
+        const lengths = eegBufs.map((b) => b.length);
+        const available = Math.min(...lengths);
+        noteLoss('eeg', estimateLoss('eeg', SAMPLE_RATE, eegBufs[0].memory.length));
+        const skew = Math.max(...lengths) - available;
+        if (skew > 0) noteLoss('eeg', skew);
+
+        const captured: number[][] = [];
         for (let i = 0; i < available; i++) {
           const row: number[] = [];
           for (let ch = 0; ch < CHANNELS; ch++) {
@@ -316,22 +419,23 @@ function App() {
           // Rows go to the recorder aligned across channels, so drain them here
           // rather than per channel — the FFT does not care about alignment but
           // a recording of raw EEG very much does.
-          if (row.length === CHANNELS && recordingRef.current) {
-            rawQueueRef.current.eeg.push(row);
-          }
+          if (row.length === CHANNELS) captured.push(row);
+        }
+        if (recordingRef.current) {
+          noteLoss('eeg', pushCapped(rawQueueRef.current.eeg, captured));
         }
       }
 
       // These are drained whether or not we are recording. Left alone they stay
-      // permanently full, which both wastes the sensor and makes every overflow
-      // check report a false positive.
-      const ppg = drainAligned(museDevice.ppg, 3, 'ppg');
-      const acc = drainAligned(museDevice.accelerometer, 3, 'acc');
-      const gyro = drainAligned(museDevice.gyroscope, 3, 'gyro');
+      // permanently full, which both wastes the sensor and makes the elapsed
+      // time since the last drain meaningless.
+      const ppg = drainAligned(museDevice.ppg, 3, 'ppg', 64);
+      const acc = drainAligned(museDevice.accelerometer, 3, 'acc', 52);
+      const gyro = drainAligned(museDevice.gyroscope, 3, 'gyro', 52);
       if (recordingRef.current) {
-        rawQueueRef.current.ppg.push(...ppg);
-        rawQueueRef.current.acc.push(...acc);
-        rawQueueRef.current.gyro.push(...gyro);
+        noteLoss('ppg', pushCapped(rawQueueRef.current.ppg, ppg));
+        noteLoss('acc', pushCapped(rawQueueRef.current.acc, acc));
+        noteLoss('gyro', pushCapped(rawQueueRef.current.gyro, gyro));
       }
 
       // Read battery level if available
@@ -451,19 +555,22 @@ function App() {
     // D. WebSocket Streaming: Send updates to Pi at 30Hz
     const wsStreamInterval = window.setInterval(() => {
       if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        const score = focusScoreRef.current;
+        const phase = calStateRef.current;
+
         // Calculate dynamic drive normalized score based on current focus
-        let drive = (focusScore - baseline) / halfRange;
+        let drive = (score - baselineRef.current) / halfRangeRef.current;
         drive = Math.max(-1.0, Math.min(1.0, drive));
-        
+
         // Push state up
         setNormalizedDrive(drive);
 
         wsRef.current.send(JSON.stringify({
-          playerId: playerId,
-          rawScore: focusScore,
+          playerId: playerIdRef.current,
+          rawScore: score,
           normalizedScore: drive,
-          calibrationPhase: calState,
-          isCalibrating: calState === 'relax' || calState === 'focus'
+          calibrationPhase: phase,
+          isCalibrating: phase === 'relax' || phase === 'focus'
         }));
       }
     }, 1000 / 30);
@@ -511,7 +618,10 @@ function App() {
       clearInterval(drainInterval);
       clearInterval(rawSendInterval);
     };
-  }, [isConnected, museDevice, isMock, focusScore, baseline, halfRange, playerId, calState]);
+    // Deliberately excludes focusScore, baseline, halfRange, calState and
+    // playerId: they are read through refs so a changing reading cannot tear
+    // down the drain and send intervals underneath raw capture.
+  }, [isConnected, museDevice, isMock]);
 
   // 3. Oscilloscope Waveform Renderer (Canvas)
   useEffect(() => {

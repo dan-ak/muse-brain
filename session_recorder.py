@@ -38,12 +38,19 @@ class SessionRecorder:
         "/pwa/acc":   ("acc.csv",   ["seat", "x", "y", "z"]),
         "/pwa/gyro":  ("gyro.csv",  ["seat", "x", "y", "z"]),
         "/pwa/bands": ("bands.csv", ["seat", "channel", "delta", "theta", "alpha", "beta", "gamma"]),
+        # Discontinuities where the client reported losing samples. Without this
+        # a dropout leaves rows that look perfectly continuous.
+        "/pwa/gap":   ("gaps.csv",  ["seat", "stream", "resumed_at"]),
     }
 
     # Raw capture writes ~1100 rows/sec across three seats. Line buffering would
     # mean a write syscall per row; a real buffer plus periodic flush costs a
     # couple of seconds of data on a crash instead of a syscall per sample.
     WRITE_BUFFER_BYTES = 1 << 16
+
+    # Longest a row may sit in the buffer before reaching the OS. Applied inside
+    # record() so every caller gets the bound, not just those that flush.
+    AUTO_FLUSH_S = 2.0
 
     def __init__(self, base_dir="recordings", now_fn=None, clock_fn=None):
         self.base_dir = Path(base_dir)
@@ -63,6 +70,7 @@ class SessionRecorder:
         self._subject = ""
         self._errors = 0
         self._extra_meta = {}
+        self._last_flush = 0.0
 
     @staticmethod
     def _safe(label):
@@ -87,6 +95,7 @@ class SessionRecorder:
             self._columns = {}
             self._addresses = set()
             self._errors = 0
+            self._last_flush = self._clock()
             self.active = True
             self._write_meta("recording")
             return self._session_dir
@@ -103,6 +112,7 @@ class SessionRecorder:
                 writer = self._writer_for(fname, cols)
                 writer.writerow([f"{t:.6f}"] + row)
                 self._counts[fname] = self._counts.get(fname, 0) + 1
+                self._flush_if_due()
             except Exception:
                 self._errors += 1
 
@@ -123,6 +133,10 @@ class SessionRecorder:
             return "elements.csv", ["addr", "v0", "v1", "v2", "v3"], [addr] + vals
         return "other.csv", ["addr", "values"], [addr, "|".join(str(a) for a in args)]
 
+    @property
+    def session_dir(self):
+        return self._session_dir
+
     def elapsed(self):
         """Seconds since the session started, on the same clock `record` stamps.
 
@@ -135,17 +149,30 @@ class SessionRecorder:
             return self._clock() - self._t0
 
     def flush(self):
-        """Push buffered rows to the OS.
-
-        Called periodically by the server so an unclean shutdown — a crash, or a
-        battery giving out in the desert — costs seconds rather than the session.
-        """
+        """Push buffered rows to the OS."""
         with self._lock:
-            for f in self._files.values():
-                try:
-                    f.flush()
-                except Exception:
-                    self._errors += 1
+            self._flush_unlocked()
+
+    def _flush_unlocked(self):
+        """Flush without taking the lock. Callers must already hold it."""
+        for f in self._files.values():
+            try:
+                f.flush()
+            except Exception:
+                self._errors += 1
+        self._last_flush = self._clock()
+
+    def _flush_if_due(self):
+        """Bound how much buffered data an unclean shutdown can cost.
+
+        Buffered writes are worth ~1100 syscalls/sec at raw capture rates, but
+        they must not depend on callers remembering to flush: the Qt visualizer
+        and the neurofeedback view never do, so a segfault or a dying battery
+        would silently lose up to a full buffer — minutes of the low-rate marker
+        streams, which is exactly the data needed to interpret a session.
+        """
+        if (self._clock() - self._last_flush) >= self.AUTO_FLUSH_S:
+            self._flush_unlocked()
 
     def _writer_for(self, fname, cols):
         writer = self._writers.get(fname)

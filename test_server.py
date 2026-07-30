@@ -475,6 +475,178 @@ class TestRawCapture:
         hub.stop_recording()
 
 
+class TestRawCaptureHardening:
+    """Regressions for defects found by review after the first implementation."""
+
+    def test_infinite_overflow_count_does_not_raise(self, recorder):
+        # json.loads accepts a bare Infinity literal, and int() raises
+        # OverflowError on it — which is not a ValueError, so it escaped
+        # handle_message and tore the player's socket down.
+        hub = PlayerHub(recorder=recorder)
+        hub.start_recording("inf")
+        outcome = hub.handle_message(
+            "p1", '{"type":"raw","eeg":[[1,2,3,4]],"overflows":{"eeg":Infinity}}'
+        )
+        assert outcome is not None
+        assert hub.overflows_for("p1") == 0
+        hub.stop_recording()
+
+    @pytest.mark.parametrize("literal", ["Infinity", "-Infinity", "NaN"])
+    def test_non_finite_overflow_counts_are_ignored(self, recorder, literal):
+        hub = PlayerHub(recorder=recorder)
+        hub.start_recording("nonfinite")
+        hub.handle_message("p1", '{"type":"raw","overflows":{"eeg":%s}}' % literal)
+        assert hub.overflows_for("p1") == 0
+        hub.stop_recording()
+
+    def test_timestamps_never_go_backwards_across_batches(self, recorder):
+        # A batch delayed by wifi power-save used to be back-dated to before rows
+        # already on disk, leaving a non-monotonic time column.
+        now = [0.0]
+        hub = PlayerHub(recorder=recorder, clock=lambda: now[0])
+        session = hub.start_recording("monotonic")
+
+        for _ in range(6):
+            now[0] += 0.05
+            hub.handle_message(
+                "p1", _raw_batch(eeg=[[i, 0, 0, 0] for i in range(32)])
+            )
+        hub.stop_recording()
+
+        times = [float(r[0]) for r in _read_csv(session / "eeg.csv")[1:]]
+        assert times == sorted(times), "eeg.csv must be chronological"
+        assert len(set(times)) == len(times), "no duplicate timestamps"
+
+    @pytest.mark.parametrize(
+        "batch",
+        [
+            '{"type":"raw","eeg":[[null,null,null,null]]}',
+            '{"type":"raw","eeg":[["a","b","c","d"]]}',
+            '{"type":"raw","eeg":[[1,2,3,{"k":1}]]}',
+            '{"type":"raw","eeg":[[1,2,3,[4]]]}',
+            '{"type":"raw","eeg":[[NaN,1,2,3]]}',
+            '{"type":"raw","eeg":[[Infinity,1,2,3]]}',
+            '{"type":"raw","eeg":[[true,false,true,false]]}',
+            '{"type":"raw","bands":[[0,null,"x",{"k":1},1,2]]}',
+        ],
+    )
+    def test_non_numeric_samples_never_reach_a_csv(self, recorder, batch):
+        # Length was checked but not type, so None/strings/dicts were written
+        # verbatim into numeric columns with errors still reported as 0.
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("junk")
+        hub.handle_message("p1", batch)
+        hub.stop_recording()
+
+        for name in ("eeg.csv", "bands.csv"):
+            path = session / name
+            if not path.exists():
+                continue
+            for row in _read_csv(path)[1:]:
+                for cell in row[2:]:
+                    assert cell not in ("", "None", "nan", "inf", "-inf", "True", "False")
+                    float(cell)  # must parse as a number
+
+    def test_valid_samples_still_get_through(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("valid")
+        hub.handle_message("p1", _raw_batch(eeg=[[1.5, -2.5, 0.0, 3]]))
+        hub.stop_recording()
+        assert _read_csv(session / "eeg.csv")[1][2:] == ["1.5", "-2.5", "0.0", "3"]
+
+    def test_mixed_batch_keeps_good_rows_and_drops_bad(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("mixed")
+        hub.handle_message(
+            "p1", '{"type":"raw","eeg":[[1,2,3,4],[null,null,null,null],[5,6,7,8]]}'
+        )
+        hub.stop_recording()
+        rows = [r[2:] for r in _read_csv(session / "eeg.csv")[1:]]
+        assert rows == [["1", "2", "3", "4"], ["5", "6", "7", "8"]]
+
+    def test_band_ticks_get_distinct_timestamps(self, recorder):
+        # Rows arrive four at a time per DSP tick. Stamping a delayed batch's
+        # several ticks with one arrival collapsed distinct windows, so anything
+        # pivoting on (t, channel) silently discarded all but one.
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("ticks")
+        two_ticks = [[ch, 1, 2, 3, 4, 5] for ch in range(4)] * 2
+        hub.handle_message("p1", _raw_batch(bands=two_ticks))
+        hub.stop_recording()
+
+        rows = _read_csv(session / "bands.csv")[1:]
+        assert len(rows) == 8
+        pairs = {(r[0], r[2]) for r in rows}
+        assert len(pairs) == 8, "each (t, channel) must be unique"
+        assert len({r[0] for r in rows}) == 2, "two ticks means two timestamps"
+
+    def test_reported_loss_is_written_to_the_recording(self, recorder):
+        # The overflow count lived only in memory, so a dropout left no trace on
+        # disk and the rows looked continuous.
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("gaps")
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]]))
+        hub.handle_message("p1", _raw_batch(eeg=[[5, 6, 7, 8]], overflows={"eeg": 40}))
+        hub.stop_recording()
+
+        gaps = _read_csv(session / "gaps.csv")
+        assert gaps[0] == ["t", "seat", "stream", "resumed_at"]
+        assert gaps[1][1:3] == ["p1", "/pwa/eeg"]
+
+    def test_no_gap_row_without_reported_loss(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("nogaps")
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]]))
+        hub.stop_recording()
+        assert not (session / "gaps.csv").exists()
+
+    def test_starting_an_active_session_again_changes_nothing(self, recorder):
+        # SessionRecorder.start is a no-op while active and keeps its directory,
+        # but the hub used to overwrite the label, zero the loss counts and
+        # re-emit connect rows anyway.
+        hub = PlayerHub(recorder=recorder)
+        first = hub.start_recording("original")
+        hub.attach("p1", object())
+        hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]], overflows={"eeg": 9}))
+        assert hub.overflows_for("p1") == 9
+
+        second = hub.start_recording("corrected")
+        assert second == first, "the directory must not change"
+        assert hub.recording_message()["label"] == "original"
+        assert hub.overflows_for("p1") == 9, "counts describe the live session"
+
+        hub.stop_recording()
+        connects = [r for r in _read_csv(first / "seats.csv")[1:] if r[2] == "connect"]
+        assert len(connects) == 1, "no phantom reconnect rows"
+
+
+class TestAutoFlush:
+    def test_rows_reach_disk_without_anyone_calling_flush(self, tmp_path):
+        # The Qt visualizer and neurofeedback view never call flush(), so
+        # buffering must not depend on callers remembering to.
+        now = [0.0]
+        rec = SessionRecorder(base_dir=tmp_path / "rec", clock_fn=lambda: now[0])
+        session = rec.start("autoflush")
+        rec.record("/pwa/seat", ["p1", "connect"])
+
+        now[0] += SessionRecorder.AUTO_FLUSH_S + 0.1
+        rec.record("/pwa/seat", ["p1", "disconnect"])
+
+        # Read without stopping: a crash would look exactly like this.
+        rows = _read_csv(session / "seats.csv")
+        assert len(rows) >= 2, "buffered rows must have been flushed"
+        rec.stop()
+
+    def test_flush_is_idempotent_and_safe_when_inactive(self, tmp_path):
+        rec = SessionRecorder(base_dir=tmp_path / "rec")
+        rec.flush()  # no session at all
+        rec.start("s")
+        rec.flush()
+        rec.flush()
+        rec.stop()
+        rec.flush()  # after stop
+
+
 class TestRecording:
     def test_nothing_is_written_until_a_session_starts(self, recorder):
         hub = PlayerHub(recorder=recorder)
