@@ -56,6 +56,56 @@ export function calculatePowerSpectrum(data: number[]): number[] {
   return spectrum;
 }
 
+// Mains hum leaks in when an electrode is not making proper skin contact. It is
+// a contact problem, not a fit problem, and it needs a different remedy — wet
+// the pad and clear hair — so it is worth reporting separately from signal
+// amplitude. In a real recording the forehead sensors sat around 25-35x while
+// poorly-seated ear clips reached 1600-7500x, so the two are far apart.
+//
+// Both mains frequencies are checked and the worse one wins: this rig is
+// developed at 50 Hz in Europe and will be used at 60 Hz in the US, and nobody
+// wants to remember to change a constant before travelling.
+export const MAINS_FREQUENCIES = [50, 60];
+
+// Above this, a channel is hum rather than EEG. Set well clear of the ~35x seen
+// on healthy contacts so ordinary variation does not trip it.
+export const MAINS_RATIO_BAD = 100;
+
+/** Power at mains frequency relative to the surrounding broadband floor.
+ *
+ * Returns 1 when there is nothing to compare against, so a silent channel reads
+ * as clean rather than alarming — a dead electrode is already reported as
+ * disconnected and does not need a second complaint.
+ */
+export function mainsRatio(powerSpectrumData: number[]): number {
+  const freqResolution = SAMPLE_RATE / WINDOW_SIZE;
+  const bin = (hz: number) => Math.round(hz / freqResolution);
+
+  // Median of 30-45 Hz as the reference floor: high enough to sit above the
+  // EEG bands, and a median rather than a mean so the hum peak itself cannot
+  // inflate the very baseline it is being measured against.
+  const floorBins = powerSpectrumData
+    .slice(bin(30), bin(45))
+    .filter((v) => Number.isFinite(v) && v > 0)
+    .sort((a, b) => a - b);
+  if (floorBins.length === 0) return 1;
+  const floor = floorBins[Math.floor(floorBins.length / 2)];
+  if (!(floor > 0)) return 1;
+
+  let worst = 0;
+  for (const hz of MAINS_FREQUENCIES) {
+    // A 1 Hz window either side, since mains drifts and generators wander.
+    const lo = Math.max(0, bin(hz - 1));
+    const hi = Math.min(powerSpectrumData.length - 1, bin(hz + 1));
+    for (let i = lo; i <= hi; i++) {
+      const v = powerSpectrumData[i];
+      if (Number.isFinite(v) && v > worst) worst = v;
+    }
+  }
+
+  return worst / floor;
+}
+
 // Sum the power within each frequency band
 export function powerByBand(powerSpectrumData: number[]): BandPowers {
   const result = {

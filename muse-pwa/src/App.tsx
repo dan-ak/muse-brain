@@ -7,6 +7,8 @@ import {
   sanitizeAndInterpolate,
   calculatePowerSpectrum,
   powerByBand,
+  mainsRatio,
+  MAINS_RATIO_BAD,
   BandPowers
 } from './utils/dsp';
 import { fetchSeats, playerSocketUrl } from './serverApi';
@@ -93,6 +95,10 @@ function App() {
   const [channelQualities, setChannelQualities] = useState<('good' | 'noise' | 'disconnected')[]>(
     ['disconnected', 'disconnected', 'disconnected', 'disconnected']
   );
+  // Mains hum per channel, relative to the broadband floor. A separate axis from
+  // contact quality because it has a different remedy: wet the pad, do not
+  // re-seat the band.
+  const [mainsRatios, setMainsRatios] = useState<number[]>([1, 1, 1, 1]);
 
   // Calibration State
   const [calState, setCalState] = useState<'idle' | 'relax' | 'focus' | 'done'>('idle');
@@ -499,6 +505,7 @@ function App() {
       if (eegBuffersRef.current[0].length < WINDOW_SIZE) return;
 
       const channelPowers: BandPowers[] = [];
+      const nextMains = [1, 1, 1, 1];
 
       for (let ch = 0; ch < CHANNELS; ch++) {
         const rawData = eegBuffersRef.current[ch];
@@ -506,6 +513,8 @@ function App() {
         const spectrum = calculatePowerSpectrum(sanitized);
         const powers = powerByBand(spectrum);
         channelPowers.push(powers);
+        // Free to compute here: the spectrum already exists for the band powers.
+        nextMains[ch] = mainsRatio(spectrum);
 
         // Per-channel band powers are computed here and were previously thrown
         // away, keeping only their average. They are the most useful derived
@@ -516,6 +525,8 @@ function App() {
           ]);
         }
       }
+
+      setMainsRatios(nextMains);
 
       // Average band powers across all 4 channels
       const avgPowers: BandPowers = {
@@ -830,6 +841,29 @@ function App() {
     return '#ef4444'; // Red
   };
 
+  // Mains hum is scored per electrode and shown alongside contact state. A
+  // channel can read "good" on amplitude while being almost entirely hum, which
+  // is exactly what happened on the ear clips in the first real recording — so
+  // an electrode swamped by mains is drawn as a problem even when its
+  // amplitude looks healthy.
+  const hasMains = (ch: number) => mainsRatios[ch] >= MAINS_RATIO_BAD;
+  const noisyElectrodes = [0, 1, 2, 3].filter(
+    (ch) => hasMains(ch) && channelQualities[ch] !== 'disconnected'
+  );
+
+  const getElectrodeColor = (ch: number) => {
+    if (channelQualities[ch] === 'disconnected') return '#ef4444';
+    if (hasMains(ch)) return '#f59e0b';
+    return getQualityColor(channelQualities[ch]);
+  };
+
+  const describeChannel = (ch: number) => {
+    if (channelQualities[ch] === 'disconnected') return 'no contact';
+    if (hasMains(ch)) return `mains hum ${Math.round(mainsRatios[ch])}x`;
+    if (channelQualities[ch] === 'noise') return 'noisy';
+    return 'good';
+  };
+
 
   return (
     <div className="app-container">
@@ -1007,22 +1041,18 @@ function App() {
             <h3 className="card-title">Headset Fit Status</h3>
             <div className="flex justify-between items-center gap-4" style={{ marginTop: '16px' }}>
               <div style={{ flexGrow: 1, display: 'flex', flexDirection: 'column', gap: '8px', fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                <div className="flex items-center gap-2">
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: getQualityColor(channelQualities[0]) }} />
-                  <span>TP9 (Left Ear): <strong style={{ color: getQualityColor(channelQualities[0]) }}>{channelQualities[0]}</strong></span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: getQualityColor(channelQualities[1]) }} />
-                  <span>AF7 (Left Forehead): <strong style={{ color: getQualityColor(channelQualities[1]) }}>{channelQualities[1]}</strong></span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: getQualityColor(channelQualities[2]) }} />
-                  <span>AF8 (Right Forehead): <strong style={{ color: getQualityColor(channelQualities[2]) }}>{channelQualities[2]}</strong></span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: getQualityColor(channelQualities[3]) }} />
-                  <span>TP10 (Right Ear): <strong style={{ color: getQualityColor(channelQualities[3]) }}>{channelQualities[3]}</strong></span>
-                </div>
+                {CHANNEL_LABELS.map((label, ch) => (
+                  <div className="flex items-center gap-2" key={label}>
+                    <span style={{
+                      width: '8px', height: '8px', borderRadius: '50%', flexShrink: 0,
+                      background: getElectrodeColor(ch),
+                    }} />
+                    <span>
+                      {label}:{' '}
+                      <strong style={{ color: getElectrodeColor(ch) }}>{describeChannel(ch)}</strong>
+                    </span>
+                  </div>
+                ))}
               </div>
 
               {/* Head SVG map */}
@@ -1037,16 +1067,44 @@ function App() {
                   <path d="M88,45 C90,45 90,55 88,55" fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="2" />
                   
                   {/* Forehead Electrodes (AF7 & AF8) */}
-                  <circle cx="38" cy="22" r="5" fill={getQualityColor(channelQualities[1])} style={{ transition: 'fill 0.3s' }} />
-                  <circle cx="62" cy="22" r="5" fill={getQualityColor(channelQualities[2])} style={{ transition: 'fill 0.3s' }} />
-                  
+                  <circle cx="38" cy="22" r="5" fill={getElectrodeColor(1)} style={{ transition: 'fill 0.3s' }} />
+                  <circle cx="62" cy="22" r="5" fill={getElectrodeColor(2)} style={{ transition: 'fill 0.3s' }} />
+
                   {/* Ear Electrodes (TP9 & TP10) */}
-                  <circle cx="20" cy="50" r="5" fill={getQualityColor(channelQualities[0])} style={{ transition: 'fill 0.3s' }} />
-                  <circle cx="80" cy="50" r="5" fill={getQualityColor(channelQualities[3])} style={{ transition: 'fill 0.3s' }} />
+                  <circle cx="20" cy="50" r="5" fill={getElectrodeColor(0)} style={{ transition: 'fill 0.3s' }} />
+                  <circle cx="80" cy="50" r="5" fill={getElectrodeColor(3)} style={{ transition: 'fill 0.3s' }} />
+
+                  {/* A ring marks hum specifically, so it reads differently from
+                      a merely noisy contact at a glance. */}
+                  {hasMains(1) && <circle cx="38" cy="22" r="8" fill="none" stroke="#f59e0b" strokeWidth="1.5" opacity="0.7" />}
+                  {hasMains(2) && <circle cx="62" cy="22" r="8" fill="none" stroke="#f59e0b" strokeWidth="1.5" opacity="0.7" />}
+                  {hasMains(0) && <circle cx="20" cy="50" r="8" fill="none" stroke="#f59e0b" strokeWidth="1.5" opacity="0.7" />}
+                  {hasMains(3) && <circle cx="80" cy="50" r="8" fill="none" stroke="#f59e0b" strokeWidth="1.5" opacity="0.7" />}
                 </svg>
               </div>
             </div>
-            {channelQualities.includes('noise') && (
+            {noisyElectrodes.length > 0 && (
+              <div style={{
+                margin: '12px 0 0 0',
+                padding: '10px 12px',
+                borderRadius: '8px',
+                background: 'rgba(245, 158, 11, 0.08)',
+                border: '1px solid var(--warning)',
+                fontSize: '0.75rem',
+                lineHeight: 1.5,
+              }}>
+                <strong style={{ color: 'var(--warning)', display: 'block', marginBottom: '3px' }}>
+                  ⚡ Mains hum on {noisyElectrodes.map((ch) => CHANNEL_LABELS[ch].split(' ')[0]).join(', ')}
+                </strong>
+                These electrodes are picking up far more mains interference than brain
+                signal. Amplitude alone looks fine, so this would otherwise pass unnoticed
+                — and it makes those channels close to unusable.
+                <br />
+                <strong>Fix:</strong> dampen the pads slightly, clear hair from underneath,
+                and reseat so they sit on bare skin.
+              </div>
+            )}
+            {channelQualities.includes('noise') && noisyElectrodes.length === 0 && (
               <p style={{ margin: '12px 0 0 0', fontSize: '0.75rem', color: 'var(--warning)', fontStyle: 'italic' }}>
                 ⚠️ High noise detected! Clear hair behind ears and wipe forehead.
               </p>
