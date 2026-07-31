@@ -593,6 +593,19 @@ class TestRawCaptureHardening:
         assert gaps[0] == ["t", "seat", "stream", "resumed_at"]
         assert gaps[1][1:3] == ["p1", "/pwa/eeg"]
 
+    def test_timestamps_are_never_negative(self, recorder):
+        # The first batch covers samples buffered before the session started, so
+        # back-dating pushed them before t=0. A real session produced 7 such
+        # rows; no downstream tool expects a negative time column.
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("t-zero")
+        hub.handle_message("p1", _raw_batch(eeg=[[i, 0, 0, 0] for i in range(64)]))
+        hub.stop_recording()
+
+        times = [float(r[0]) for r in _read_csv(session / "eeg.csv")[1:]]
+        assert min(times) >= 0.0, "no sample may predate the session"
+        assert times == sorted(times)
+
     def test_no_gap_row_without_reported_loss(self, recorder):
         hub = PlayerHub(recorder=recorder)
         session = hub.start_recording("nogaps")

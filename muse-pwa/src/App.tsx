@@ -361,14 +361,16 @@ function App() {
       const bufs = buffers.slice(0, width);
       if (bufs.length < width || bufs.some((b) => !b)) return rows;
 
-      const lengths = bufs.map((b) => b.length);
-      const shortest = Math.min(...lengths);
-      const longest = Math.max(...lengths);
+      const shortest = Math.min(...bufs.map((b) => b.length));
       noteLoss(stream, estimateLoss(stream, rate, bufs[0].memory.length));
-      // Unequal fill means alignment is already lost for this stream; say so
-      // rather than silently re-pairing channels from here on.
-      if (longest > shortest) noteLoss(stream, longest - shortest);
 
+      // Uneven fill across channels is NOT reported as loss. Channels arrive in
+      // separate BLE notifications, so at any instant the buffers differ by a
+      // few samples; the surplus stays put and drains on the next poll. A real
+      // session showed 99.9% capture while every batch reported a gap, which
+      // made the gap log useless — and worse, would have masked a real dropout.
+      // Genuine loss is caught by the elapsed-time test above, which is
+      // provable rather than inferred from a transient.
       for (let i = 0; i < shortest; i++) {
         const row: number[] = [];
         for (const b of bufs) {
@@ -390,12 +392,9 @@ function App() {
       }
 
       if (eegBufs.length === CHANNELS) {
-        const lengths = eegBufs.map((b) => b.length);
-        const available = Math.min(...lengths);
+        const available = Math.min(...eegBufs.map((b) => b.length));
         noteLoss('eeg', estimateLoss('eeg', SAMPLE_RATE, eegBufs[0].memory.length));
-        const skew = Math.max(...lengths) - available;
-        if (skew > 0) noteLoss('eeg', skew);
-
+        // Transient channel skew is normal and self-correcting — see drainAligned.
         const captured: number[][] = [];
         for (let i = 0; i < available; i++) {
           const row: number[] = [];
