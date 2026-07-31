@@ -41,6 +41,11 @@ class SessionRecorder:
         # Discontinuities where the client reported losing samples. Without this
         # a dropout leaves rows that look perfectly continuous.
         "/pwa/gap":   ("gaps.csv",  ["seat", "stream", "resumed_at"]),
+
+        # What the participant was asked to do, and when. Without these a
+        # recording is unlabelled: the first real experiment could not be
+        # evaluated at all because nothing marked the condition changes.
+        "/pwa/cue":   ("cues.csv",  ["seat", "phase", "eyes", "task", "trial"]),
     }
 
     # Raw capture writes ~1100 rows/sec across three seats. Line buffering would
