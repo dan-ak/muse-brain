@@ -24,7 +24,7 @@
 #
 # Example:
 #   export MUSE_DOMAIN=brain.a-ibk.com
-#   export MUSE_ACME_EMAIL=dan.acostakane@gmail.com
+#   export MUSE_ACME_EMAIL=you@example.com
 #   export MUSE_DNS_PROVIDER=dns_cf
 #   export CF_Token=...      # Zone > DNS > Edit, scoped to a-ibk.com
 #   export CF_Zone_ID=...    # from the zone overview page, right sidebar

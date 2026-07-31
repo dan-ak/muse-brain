@@ -94,7 +94,7 @@ never needs permission to list your zones.
 
 ```bash
 export MUSE_DOMAIN=brain.a-ibk.com
-export MUSE_ACME_EMAIL=dan.acostakane@gmail.com
+export MUSE_ACME_EMAIL=you@example.com
 export MUSE_DNS_PROVIDER=dns_cf
 export CF_Token=...        # the token you just created
 export CF_Zone_ID=...      # from the a-ibk.com overview page

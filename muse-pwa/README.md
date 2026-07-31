@@ -1,50 +1,44 @@
-# React + TypeScript + Vite
+# muse-pwa
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+The phone app. Pairs a Muse headband over Web Bluetooth, computes a focus score
+in the browser, and streams both that and the raw signal to the Pi.
 
-Currently, two official plugins are available:
+See the [root README](../README.md) for the whole system.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type aware lint rules:
-
-- Configure the top-level `parserOptions` property like this:
-
-```js
-export default tseslint.config({
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+```bash
+npm ci
+npm run build      # output goes to dist/, which the Pi serves
+npm run dev        # port 3001, proxying /ws and /api to a local server.py
 ```
 
-- Replace `tseslint.configs.recommended` to `tseslint.configs.recommendedTypeChecked` or `tseslint.configs.strictTypeChecked`
-- Optionally add `...tseslint.configs.stylisticTypeChecked`
-- Install [eslint-plugin-react](https://github.com/jsx-eslint/eslint-plugin-react) and update the config:
+## Things that will surprise you
 
-```js
-// eslint.config.js
-import react from 'eslint-plugin-react'
+**Web Bluetooth needs a secure context.** Over plain HTTP from a LAN address
+`navigator.bluetooth` is simply undefined and the pair button cannot work.
+`localhost` is exempt, which is why development works without a certificate.
 
-export default tseslint.config({
-  // Set the react version
-  settings: { react: { version: '18.3' } },
-  plugins: {
-    // Add the react plugin
-    react,
-  },
-  rules: {
-    // other rules...
-    // Enable its recommended rules
-    ...react.configs.recommended.rules,
-    ...react.configs['jsx-runtime'].rules,
-  },
-})
-```
+**Android and Chrome only.** iOS has no Web Bluetooth in any browser.
+
+**`web-muse` is patched.** Three upstream bugs are fixed in
+`patches/web-muse+1.0.0.patch`, applied automatically on `npm ci`: an unawaited
+`startNotifications()` that made pairing fail intermittently, a disconnect
+handler that never fired, and a hard requirement for PPG characteristics that
+the 2016 Muse does not have. Do not install in a way that skips `postinstall`,
+or pairing will start failing again.
+
+**A backgrounded tab is throttled to ~1 Hz.** Browsers clamp timers in hidden
+tabs, so a locked screen quietly drops streaming from 30 Hz to 1 Hz and loses
+raw samples. The client holds a screen wake lock while streaming, and the
+server reports a seat as throttled or stale rather than pretending it is fine.
+
+## Layout
+
+| Path | |
+|---|---|
+| `src/App.tsx` | the player view: pairing, fit status, calibration, streaming |
+| `src/Dashboard.tsx` | operator view at `/dashboard` — all seats, recording control |
+| `src/CuedProtocol.tsx` | the 2×2 cued task with audio cues |
+| `src/utils/dsp.ts` | FFT, band powers, mains-hum detection |
+| `src/utils/protocol.ts` | trial sequence generation, pure and testable |
+| `src/utils/cueAudio.ts` | tones and speech |
+| `src/serverApi.ts` | same-origin socket URLs and session control |

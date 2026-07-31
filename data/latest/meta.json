@@ -1,0 +1,81 @@
+{
+  "label": "calmfocus",
+  "subject": "",
+  "status": "complete",
+  "start_iso": "2026-07-31T12:00:41",
+  "end_iso": "2026-07-31T12:02:24",
+  "duration_s": 102.992,
+  "streams": {
+    "seats.csv": 1,
+    "telemetry.csv": 3121,
+    "eeg.csv": 26364,
+    "ppg.csv": 6594,
+    "acc.csv": 5352,
+    "gyro.csv": 5352,
+    "bands.csv": 1648
+  },
+  "columns": {
+    "seats.csv": [
+      "t",
+      "seat",
+      "event"
+    ],
+    "telemetry.csv": [
+      "t",
+      "seat",
+      "focus_score",
+      "normalized",
+      "calibrating"
+    ],
+    "eeg.csv": [
+      "t",
+      "seat",
+      "TP9",
+      "AF7",
+      "AF8",
+      "TP10"
+    ],
+    "ppg.csv": [
+      "t",
+      "seat",
+      "ppg1",
+      "ppg2",
+      "ppg3"
+    ],
+    "acc.csv": [
+      "t",
+      "seat",
+      "x",
+      "y",
+      "z"
+    ],
+    "gyro.csv": [
+      "t",
+      "seat",
+      "x",
+      "y",
+      "z"
+    ],
+    "bands.csv": [
+      "t",
+      "seat",
+      "channel",
+      "delta",
+      "theta",
+      "alpha",
+      "beta",
+      "gamma"
+    ]
+  },
+  "addresses": [
+    "/pwa/acc",
+    "/pwa/bands",
+    "/pwa/eeg",
+    "/pwa/gyro",
+    "/pwa/ppg",
+    "/pwa/seat",
+    "/pwa/telemetry"
+  ],
+  "errors": 0,
+  "source": "pwa-websocket"
+}

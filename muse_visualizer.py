@@ -77,7 +77,7 @@ DEPTH_BANDS = 6                         # opacity bands for depth-shaded renderi
 
 
 FACE_OBJ_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                             "canonical_face_model.obj")
+                             "assets", "canonical_face_model.obj")
 
 
 def polylines_to_segments(polylines: list[np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
@@ -217,9 +217,9 @@ def _load_full_obj_as_style(filename: str, name: str,
 
 HEAD_STYLES: list[HeadStyle] = [
     _build_realface_style(),
-    _load_full_obj_as_style("nefertiti.obj", "Nefertiti bust"),
-    _load_full_obj_as_style("suzanne.obj", "Suzanne (Blender)"),
-    _load_full_obj_as_style("spot.obj", "Spot the cow"),
+    _load_full_obj_as_style("assets/nefertiti.obj", "Nefertiti bust"),
+    _load_full_obj_as_style("assets/suzanne.obj", "Suzanne (Blender)"),
+    _load_full_obj_as_style("assets/spot.obj", "Spot the cow"),
 ]
 
 
