@@ -387,6 +387,10 @@ class PlayerHub:
         previous = self._last_sample_t.get(key)
         if previous is not None and first <= previous:
             first = previous + step
+        # The first batch of a session covers samples buffered before it began,
+        # so back-dating pushes them before t=0. Honest, but a negative time
+        # column is a surprise no downstream tool expects.
+        first = max(0.0, first)
 
         for index, sample in enumerate(rows):
             t = first + index * step
