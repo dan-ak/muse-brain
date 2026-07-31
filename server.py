@@ -96,6 +96,12 @@ BANDS_HZ = 4.0  # the client's DSP interval
 # is visible in the recording itself rather than only in a live counter.
 ADDR_GAP = "/pwa/gap"
 
+# What the participant was cued to do. The label a recording is worthless
+# without: an unmarked session cannot be evaluated even by its own author.
+ADDR_CUE = "/pwa/cue"
+CUE = "cue"
+CUE_PHASES = {"instruct", "trial", "rest", "done"}
+
 RAW = "raw"
 
 
@@ -193,6 +199,9 @@ class PlayerHub:
 
         if data.get("type") == RAW:
             return self._handle_raw(seat_id, data)
+
+        if data.get("type") == CUE:
+            return self._handle_cue(seat_id, data)
 
         if data.get("event") == "calibration_complete":
             # Worth recording: a normalized score cannot be interpreted later
@@ -340,6 +349,34 @@ class PlayerHub:
             self._record_bands(seat_id, bands, arrival)
 
         return RAW
+
+    def _handle_cue(self, seat_id, data):
+        """Record a protocol phase change.
+
+        Timestamped on arrival rather than back-dated: a cue marks the moment
+        the participant was told something, and the network delay between the
+        phone playing a tone and this arriving is a few milliseconds against
+        trials tens of seconds long.
+        """
+        phase = data.get("phase")
+        if phase not in CUE_PHASES:
+            return IGNORED
+
+        eyes = data.get("eyes")
+        task = data.get("task")
+        trial = data.get("trial")
+
+        # A rest or a finish carries no condition, which is not an error.
+        eyes = eyes if isinstance(eyes, str) else ""
+        task = task if isinstance(task, str) else ""
+        try:
+            trial = int(trial) if trial is not None else ""
+        except (TypeError, ValueError):
+            trial = ""
+
+        logger.info("Seat %s cue: %s %s %s", seat_id, phase, eyes, task)
+        self._record(ADDR_CUE, [seat_id, phase, eyes, task, trial])
+        return CUE
 
     def _note_overflows(self, seat_id, overflows):
         """Accumulate reported buffer overflows. Returns whether any were new.

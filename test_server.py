@@ -633,6 +633,84 @@ class TestRawCaptureHardening:
         assert len(connects) == 1, "no phantom reconnect rows"
 
 
+def _cue(**kw):
+    return json.dumps(dict(type="cue", **kw))
+
+
+class TestCueMarkers:
+    """Without these a recording cannot be evaluated even by its own author."""
+
+    def test_a_trial_cue_is_recorded_with_its_condition(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("cued")
+        hub.handle_message("p1", _cue(phase="trial", eyes="closed", task="focus", trial=3))
+        hub.stop_recording()
+
+        rows = _read_csv(session / "cues.csv")
+        assert rows[0] == ["t", "seat", "phase", "eyes", "task", "trial"]
+        assert rows[1][1:] == ["p1", "trial", "closed", "focus", "3"]
+
+    def test_rest_and_done_carry_no_condition(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("rests")
+        hub.handle_message("p1", _cue(phase="rest"))
+        hub.handle_message("p1", _cue(phase="done"))
+        hub.stop_recording()
+
+        rows = _read_csv(session / "cues.csv")[1:]
+        assert [r[2] for r in rows] == ["rest", "done"]
+        assert all(r[3] == "" and r[4] == "" for r in rows)
+
+    def test_the_full_2x2_round_trips(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("factorial")
+        for i, (eyes, task) in enumerate(
+            [("open", "calm"), ("open", "focus"), ("closed", "calm"), ("closed", "focus")], 1
+        ):
+            hub.handle_message("p1", _cue(phase="trial", eyes=eyes, task=task, trial=i))
+        hub.stop_recording()
+
+        rows = _read_csv(session / "cues.csv")[1:]
+        assert [(r[3], r[4]) for r in rows] == [
+            ("open", "calm"), ("open", "focus"), ("closed", "calm"), ("closed", "focus"),
+        ]
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            _cue(phase="not-a-phase"),
+            _cue(),
+            json.dumps({"type": "cue", "phase": 7}),
+        ],
+    )
+    def test_unknown_phases_are_ignored(self, recorder, payload):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("badcue")
+        assert hub.handle_message("p1", payload) == IGNORED
+        hub.stop_recording()
+        assert not (session / "cues.csv").exists()
+
+    def test_a_nonsense_trial_number_does_not_raise(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        session = hub.start_recording("badtrial")
+        hub.handle_message("p1", _cue(phase="trial", eyes="open", task="calm", trial="many"))
+        hub.stop_recording()
+        assert _read_csv(session / "cues.csv")[1][5] == ""
+
+    def test_cues_do_not_disturb_telemetry(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        hub.start_recording("mixed")
+        hub.handle_message("p1", json.dumps({"rawScore": 2.0, "normalizedScore": 0.5}))
+        hub.handle_message("p1", _cue(phase="trial", eyes="open", task="focus", trial=1))
+        hub.stop_recording()
+        assert hub.state_of("p1") == {"raw": 2.0, "normalized": 0.5, "calibrating": False}
+
+    def test_cues_outside_a_session_are_harmless(self, recorder):
+        hub = PlayerHub(recorder=recorder)
+        assert hub.handle_message("p1", _cue(phase="trial", eyes="open", task="calm")) is not None
+        assert hub.recording is False
+
+
 class TestAutoFlush:
     def test_rows_reach_disk_without_anyone_calling_flush(self, tmp_path):
         # The Qt visualizer and neurofeedback view never call flush(), so

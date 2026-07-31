@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { connectMuse, Muse, MuseCircularBuffer } from 'web-muse';
 import {
   SAMPLE_RATE,
@@ -12,6 +12,8 @@ import {
   BandPowers
 } from './utils/dsp';
 import { fetchSeats, playerSocketUrl } from './serverApi';
+import CuedProtocol from './CuedProtocol';
+import { Condition } from './utils/protocol';
 import './App.css';
 
 // Channel labels for Muse 2
@@ -712,6 +714,24 @@ function App() {
     };
   }, [isConnected]);
 
+  // Cues go straight out rather than through the raw queue: they are tiny,
+  // rare, and their timing is the whole point — batching would blur the very
+  // boundary the recording exists to mark.
+  const handleCue = useCallback(
+    (cue: { phase: string; condition?: Condition; trial?: number }) => {
+      const socket = wsRef.current;
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      socket.send(JSON.stringify({
+        type: 'cue',
+        phase: cue.phase,
+        eyes: cue.condition?.eyes,
+        task: cue.condition?.task,
+        trial: cue.trial,
+      }));
+    },
+    [],
+  );
+
   // 4. Connection Handlers
   const handleConnectReal = async () => {
     if (!bluetoothAvailable) return;
@@ -1175,6 +1195,8 @@ function App() {
               )}
             </div>
           </section>
+
+          <CuedProtocol onCue={handleCue} disabled={!isConnected} />
 
         </div>
 
