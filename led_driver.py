@@ -240,10 +240,10 @@ def _bring_up(argv=None):
 
         print(f"sweeping blue -> red on {args.host}, ctrl-c to stop")
         while True:
-            for i in range(101):
+            for i in range(-100, 101):
                 strip.show(focus_to_rgb(i / 100.0))
                 time.sleep(0.02)
-            for i in range(100, -1, -1):
+            for i in range(100, -101, -1):
                 strip.show(focus_to_rgb(i / 100.0))
                 time.sleep(0.02)
     except KeyboardInterrupt:
