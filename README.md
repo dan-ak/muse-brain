@@ -117,7 +117,7 @@ Two behaviours worth knowing:
   the strip back to its local effect after ~2 s, which is a readable signal that
   nobody is driving it.
 
-If the strip drops back to its own effect after about three seconds while the
+If the strip drops back to its own effect after about five seconds while the
 phone still says it is streaming, the score has stopped *changing* rather than
 stopped arriving. Liveness here means a moving value, not incoming frames — a
 phone whose headset died keeps sending its last score forever, so an unchanging
@@ -147,7 +147,7 @@ worth knowing before comparing numbers across them.
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest    # 206 tests
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest    # 207 tests
 
 cd muse-pwa && npm ci && npm run build
 ```

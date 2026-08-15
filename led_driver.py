@@ -103,6 +103,14 @@ def build_dnrgb_packets(rgb, count: int, timeout_s: int = DEFAULT_TIMEOUT_S) -> 
     return packets
 
 
+def _resolve(host: str) -> str:
+    """Host to a literal address, or the host unchanged if it will not resolve."""
+    try:
+        return socket.gethostbyname(host)
+    except OSError:
+        return host
+
+
 class WledStrip:
     """A WLED controller addressed over UDP realtime.
 
@@ -113,19 +121,35 @@ class WledStrip:
 
     def __init__(self, host: str, count: int, port: int = WLED_REALTIME_PORT,
                  timeout_s: int = DEFAULT_TIMEOUT_S, sock=None):
-        self._addr = (host, port)
+        # Resolved once, here, rather than on every ``sendto``. The caller is
+        # an asyncio loop that also flushes the recording, and a name like
+        # ``wled.local`` would otherwise put a synchronous mDNS lookup in front
+        # of every frame - hundreds of milliseconds of stalled loop at 10 Hz
+        # whenever the responder is slow or gone. A failure here is not fatal:
+        # keep the name and let each send fail cheaply instead.
+        self._addr = (_resolve(host), port)
         self._count = count
         self._timeout_s = timeout_s
-        self._sock = sock or socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        if sock is None:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            # A full send buffer must drop the frame, never park the loop.
+            sock.setblocking(False)
+        self._sock = sock
 
     def show(self, rgb) -> bool:
-        """Paint the whole strip. True if every datagram went out."""
-        try:
-            for packet in build_dnrgb_packets(rgb, self._count, self._timeout_s):
+        """Paint the whole strip. True if every datagram went out.
+
+        A failed datagram does not abandon the rest: on a strip long enough to
+        need several, stopping early would leave its head on the new colour and
+        its tail on the old one.
+        """
+        sent = True
+        for packet in build_dnrgb_packets(rgb, self._count, self._timeout_s):
+            try:
                 self._sock.sendto(packet, self._addr)
-        except OSError:
-            return False
-        return True
+            except OSError:
+                sent = False
+        return sent
 
     def release(self) -> None:
         """Stop driving and let WLED's realtime timeout reclaim the strip.

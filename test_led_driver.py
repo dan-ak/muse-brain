@@ -198,6 +198,22 @@ def test_strip_reports_send_failures_without_raising():
     assert strip.show((10, 20, 30)) is False
 
 
+def test_one_failed_datagram_does_not_abandon_the_rest():
+    # Stopping at the first failure would leave the head of a long strip on the
+    # new colour and its tail on the old one until the next frame lands.
+    class FlakyFirstSocket(FakeSocket):
+        def sendto(self, payload, addr):
+            if not self.sent and not getattr(self, "_failed", False):
+                self._failed = True
+                raise OSError("no buffer space")
+            self.sent.append((payload, addr))
+
+    sock = FlakyFirstSocket()
+    strip = WledStrip("10.0.0.5", count=DNRGB_MAX_PIXELS + 1, sock=sock)
+    assert strip.show((1, 2, 3)) is False
+    assert len(sock.sent) == 1   # the second datagram still went out
+
+
 def test_strip_reports_success():
     sock = FakeSocket()
     strip = WledStrip("10.0.0.5", count=3, sock=sock)

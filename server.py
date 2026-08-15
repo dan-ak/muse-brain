@@ -766,7 +766,14 @@ async def _broadcast_loop(app):
         # dashboard open. FocusLight swallows its own transport errors, so a
         # missing controller cannot interrupt this loop.
         if light is not None:
-            light.update(snapshot)
+            try:
+                light.update(snapshot)
+            except Exception:
+                # The invariant is worth more than the diagnosis: an unforeseen
+                # failure in the lights must not end the task that flushes the
+                # recording and feeds the dashboard. Debug level because this
+                # would otherwise log ten times a second.
+                logger.debug("Light update failed", exc_info=True)
 
         if not observers:
             continue
@@ -963,6 +970,11 @@ def main(argv=None):
             raise SystemExit(
                 f"--led-seat {args.led_seat} is not one of {', '.join(hub.seat_ids)}"
             )
+        # A count of zero produces no datagrams at all, so the strip would sit
+        # on WLED's own effect while the log claimed it was being driven -
+        # the silent failure this whole feature is written to avoid.
+        if args.led_count < 1:
+            raise SystemExit(f"--led-count must be at least 1, got {args.led_count}")
         strip = WledStrip(args.led_host, count=args.led_count)
         light = FocusLight(strip, seat=args.led_seat)
         logger.info(
