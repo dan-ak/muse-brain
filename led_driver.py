@@ -1,15 +1,9 @@
-"""Drive a WLED controller from a seat's focus score.
+"""Stream pixels to a WLED controller.
 
-Maps one seat's ``normalized`` score onto a blue-to-red ramp and streams it to a
-WLED controller over its UDP realtime protocol (DNRGB). Pure functions plus a
-fire-and-forget socket: no asyncio, no wall clock, and nothing here can raise
-into the caller, because the caller is the loop that records the EEG.
-
-The mapping is deliberately not a linear RGB interpolation. Lerping blue to red
-passes through a half-brightness purple, so the middle of the scale reads as a
-fault rather than as a middle value. Interpolating along the hue circle instead
-(240 degrees to 360) keeps every point on the ramp fully saturated and equally
-bright: blue -> violet -> magenta -> red.
+Transport only: framing a pixel list as WLED DNRGB datagrams and getting them
+onto the wire. Colour and layout decisions live in ``strip_render``. Nothing
+here can raise into the caller, because the caller is the loop that records the
+EEG.
 """
 
 from __future__ import annotations
@@ -34,27 +28,6 @@ DNRGB_MAX_PIXELS = 489
 # effect. Long enough to bridge a missed frame at 10 Hz, short enough that a
 # dead Pi visibly hands the strip back rather than freezing it.
 DEFAULT_TIMEOUT_S = 2
-
-RELAXED = (0, 0, 255)
-CONCENTRATED = (255, 0, 0)
-
-
-def focus_to_rgb(drive: float) -> tuple[int, int, int]:
-    """-1.0 -> blue (relaxed), 0.0 -> magenta (baseline), +1.0 -> red.
-
-    The drive arriving from the phone is signed: it is
-    ``(score - baseline) / halfRange`` clamped to [-1, +1], so zero means "at
-    your own calibrated baseline", not "relaxed". Clamping it to [0, 1] threw
-    away the entire relaxed half of the range.
-
-    Walks the hue circle from 240 to 360 degrees at full saturation and value,
-    which on that arc is exactly two linear segments: blue to magenta, then
-    magenta to red.
-    """
-    t = (min(1.0, max(-1.0, float(drive))) + 1.0) / 2.0
-    if t <= 0.5:
-        return (round(255 * t * 2), 0, 255)
-    return (255, 0, round(255 * (1 - (t - 0.5) * 2)))
 
 
 class Smoother:
@@ -195,6 +168,8 @@ class FocusLight:
 
     def update(self, snapshot) -> tuple[int, int, int] | None:
         """Drive one frame. Returns the colour shown, or None if released."""
+        from strip_render import focus_to_rgb
+
         score = self._score(snapshot)
         if score is None:
             self._smoother.reset()
@@ -230,6 +205,8 @@ def _bring_up(argv=None):
     exact opposite of the wearer's state with nothing logging an error.
     """
     import argparse
+
+    from strip_render import CONCENTRATED, RELAXED, focus_to_rgb
 
     parser = argparse.ArgumentParser(description="Smoke-test a WLED strip.")
     parser.add_argument("host", help="WLED controller address")

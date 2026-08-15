@@ -7,7 +7,6 @@ from led_driver import (
     Smoother,
     WledStrip,
     build_dnrgb_packets,
-    focus_to_rgb,
     solid,
 )
 
@@ -18,58 +17,6 @@ class FakeClock:
 
     def __call__(self):
         return self.t
-
-
-# --- colour ramp -------------------------------------------------------------
-
-
-def test_neutral_drive_is_magenta_not_blue():
-    # The drive is signed: 0.0 is the calibrated baseline, not "relaxed".
-    # Clamping to [0, 1] made the whole negative half read as fully relaxed.
-    assert focus_to_rgb(0.0) == (255, 0, 255)
-
-
-def test_fully_relaxed_is_blue():
-    assert focus_to_rgb(-1.0) == (0, 0, 255)
-
-
-def test_relaxed_half_of_the_range_is_not_all_blue():
-    assert focus_to_rgb(-0.5) != focus_to_rgb(-1.0)
-
-
-def test_relaxed_is_blue():
-    assert focus_to_rgb(-1.0) == (0, 0, 255)
-
-
-def test_concentrated_is_red():
-    assert focus_to_rgb(1.0) == (255, 0, 0)
-
-
-def test_midpoint_is_magenta():
-    assert focus_to_rgb(0.0) == (255, 0, 255)
-
-
-def test_ramp_never_dims_in_the_middle():
-    # The reason for interpolating around the hue circle instead of lerping RGB:
-    # a straight blue->red lerp passes through (127, 0, 127), so the middle of
-    # the scale reads as "the lights are broken" rather than as a middle value.
-    for i in range(-100, 101):
-        assert max(focus_to_rgb(i / 100.0)) == 255
-
-
-def test_ramp_has_no_green():
-    for i in range(-100, 101):
-        assert focus_to_rgb(i / 100.0)[1] == 0
-
-
-def test_ramp_is_monotonic_in_red():
-    reds = [focus_to_rgb(i / 100.0)[0] for i in range(-100, 101)]
-    assert reds == sorted(reds)
-
-
-def test_out_of_range_scores_are_clamped():
-    assert focus_to_rgb(-1.5) == focus_to_rgb(-1.0)
-    assert focus_to_rgb(1.5) == focus_to_rgb(1.0)
 
 
 # --- smoothing ---------------------------------------------------------------
