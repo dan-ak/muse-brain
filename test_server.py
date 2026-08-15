@@ -18,6 +18,7 @@ from server import (
     create_app,
     make_redirect_app,
     make_seat_ids,
+    parse_args,
 )
 from session_recorder import SessionRecorder
 
@@ -1186,3 +1187,69 @@ class TestSessionControl:
             rows = _read_csv(recorder.base_dir / started["dir"].split("/")[-1] / "telemetry.csv")
             assert [r[1] for r in rows[1:]] == ["p1"]
             assert rows[1][2:] == ["2.0", "0.9", "0"]
+
+
+class FakeLight:
+    """Stands in for a FocusLight so the broadcast loop can be tested off-wire."""
+
+    def __init__(self):
+        self.snapshots = []
+
+    def update(self, snapshot):
+        self.snapshots.append(snapshot)
+
+
+class TestLightOutput:
+    @async_test
+    async def test_light_is_driven_by_the_broadcast_loop(self, static_dir):
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        light = FakeLight()
+        app = create_app(static_dir=static_dir, hub=hub, light=light)
+        async with TestClient(TestServer(app)) as client:
+            async with client.ws_connect("/ws/p1") as player:
+                await player.send_json({"normalizedScore": 0.9})
+                await _settle(0.3)
+
+        seen = [
+            seat for snap in light.snapshots
+            for seat in snap["seats"]
+            if seat["id"] == "p1" and seat["normalized"] == 0.9
+        ]
+        assert seen, "light never saw p1 telemetry"
+
+    @async_test
+    async def test_light_runs_with_no_dashboard_connected(self, static_dir):
+        # The strip has to keep working when nobody has the dashboard open, so
+        # driving it must not be gated on there being an observer attached.
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        light = FakeLight()
+        app = create_app(static_dir=static_dir, hub=hub, light=light)
+        async with TestClient(TestServer(app)) as client:
+            assert (await client.get("/healthz")).status == 200
+            await _settle(0.3)
+
+        assert light.snapshots, "light was never driven without an observer"
+
+    @async_test
+    async def test_server_runs_without_a_light(self, static_dir):
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            await _settle(0.15)
+            assert (await client.get("/healthz")).status == 200
+
+
+class TestLightArgs:
+    def test_lights_are_off_by_default(self):
+        assert parse_args([]).led_host is None
+
+    def test_led_host_enables_the_strip(self):
+        args = parse_args(["--led-host", "10.0.0.5"])
+        assert args.led_host == "10.0.0.5"
+
+    def test_led_count_and_seat_are_configurable(self):
+        args = parse_args(["--led-host", "10.0.0.5", "--led-count", "144", "--led-seat", "p2"])
+        assert args.led_count == 144
+        assert args.led_seat == "p2"
+
+    def test_led_seat_defaults_to_the_first_seat(self):
+        assert parse_args([]).led_seat == "p1"

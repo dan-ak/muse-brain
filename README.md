@@ -76,12 +76,61 @@ not something a setting fixes.
    beeped cues so nobody has to watch a screen
 5. Stop recording, then `./scripts/publish-session.sh` to put it in `data/`
 
+## Lights
+
+An LED strip can show one wearer's state to the room: **blue when relaxed, red
+when concentrated**, everything between on a fully-saturated hue ramp through
+magenta.
+
+The strip is driven by a [WLED](https://kno.wled.ge) controller — a GLEDOPTO
+Elite ESP32 (`GL-C-615WL`, or `GL-C-616WL` for the Ethernet version) ships with
+WLED already flashed. The Pi streams to it over WLED's UDP realtime protocol, so
+there is no hub, no MQTT, and nothing to install on the controller.
+
+Prove the wiring before involving any EEG:
+
+```bash
+.venv/bin/python led_driver.py 10.0.0.5 --count 144 --check   # holds blue, then red
+.venv/bin/python led_driver.py 10.0.0.5 --count 144           # sweeps the full ramp
+```
+
+Then hand the address to the server:
+
+```bash
+.venv/bin/python server.py --led-host 10.0.0.5 --led-count 144 --led-seat p1
+```
+
+Without `--led-host` the strip is simply off, and nothing about the recording
+path changes.
+
+**Check the colour order in WLED first.** WS2815 is a GRB part; if WLED is left
+on RGB the strip shows the exact *opposite* of the wearer's state and nothing
+anywhere reports an error. `--check` exists to catch precisely this.
+
+Two behaviours worth knowing:
+
+- **Sends are fire-and-forget UDP and failures are swallowed.** A controller
+  that is unplugged, rebooting, or buried in dust cannot raise into the loop
+  that writes the recording. Lights must never be able to cost you data.
+- **When the seat drops out, calibrates, or goes stale, the Pi stops sending**
+  rather than showing a neutral colour. WLED's own realtime timeout then hands
+  the strip back to its local effect after ~2 s, which is a readable signal that
+  nobody is driving it.
+
+If the strip drops back to its own effect after about five seconds while the
+phone still says it is streaming, the score has stopped *changing* rather than
+stopped arriving. Liveness here means a moving value, not incoming frames — a
+phone whose headset died keeps sending its last score forever, so an unchanging
+reading is treated as a dead source and the seat goes stale. The lights are
+reporting that faithfully; look at the headset, not the strip.
+
 ## Repository layout
 
 | Path | |
 |---|---|
 | `server.py` | the Pi: serves the app, collects telemetry, writes recordings |
 | `session_recorder.py` | CSV recording, shared by both capture paths |
+| `led_driver.py` | drives an LED strip from a seat's focus score |
 | `muse-pwa/` | the phone app (React + TypeScript) |
 | `analysis/` | loading and summarising recorded sessions |
 | `data/latest/` | the most recent published session |
@@ -98,7 +147,7 @@ worth knowing before comparing numbers across them.
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest    # 165 tests
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest    # 207 tests
 
 cd muse-pwa && npm ci && npm run build
 ```

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from aiohttp import WSCloseCode, WSMsgType, web
 
+from led_driver import FocusLight, WledStrip
 from session_recorder import SessionRecorder
 
 logger = logging.getLogger("muse.server")
@@ -59,8 +60,12 @@ THROTTLED_BELOW_HZ = 5.0
 # the first thing a new device sees is a connection refused.
 DEFAULT_REDIRECT_PORT = 80
 
+# Only used when --led-host is given; the strip is off by default.
+DEFAULT_LED_COUNT = 144
+
 HUB = web.AppKey("hub")
 STATIC_DIR = web.AppKey("static_dir", Path)
+LIGHT = web.AppKey("light")
 BROADCAST_TASK = web.AppKey("broadcast_task")
 REDIRECT_CONFIG = web.AppKey("redirect_config")
 REDIRECT_RUNNER = web.AppKey("redirect_runner")
@@ -750,10 +755,30 @@ async def _broadcast_loop(app):
             hub.flush_recorder()
 
         observers = tuple(hub.observers)
+        light = app[LIGHT]
+        if light is None and not observers:
+            continue
+
+        snapshot = hub.snapshot()
+
+        # Driven before the observer fan-out and independently of it: the strip
+        # has to keep showing the wearer's state whether or not anyone has the
+        # dashboard open. FocusLight swallows its own transport errors, so a
+        # missing controller cannot interrupt this loop.
+        if light is not None:
+            try:
+                light.update(snapshot)
+            except Exception:
+                # The invariant is worth more than the diagnosis: an unforeseen
+                # failure in the lights must not end the task that flushes the
+                # recording and feeds the dashboard. Debug level because this
+                # would otherwise log ten times a second.
+                logger.debug("Light update failed", exc_info=True)
+
         if not observers:
             continue
 
-        payload = json.dumps(hub.snapshot())
+        payload = json.dumps(snapshot)
         # Send concurrently so one observer on a bad link cannot pace the loop
         # for everyone else.
         results = await asyncio.gather(
@@ -825,10 +850,11 @@ async def _stop_broadcast(app):
         await task
 
 
-def create_app(static_dir=DEFAULT_STATIC_DIR, hub=None, recorder=None):
+def create_app(static_dir=DEFAULT_STATIC_DIR, hub=None, recorder=None, light=None):
     app = web.Application()
     app[HUB] = hub if hub is not None else PlayerHub(recorder=recorder)
     app[STATIC_DIR] = Path(static_dir)
+    app[LIGHT] = light
 
     # Registration order is resolution order. /ws/observe has to precede the
     # seat pattern or it would be matched as a seat named "observe", and the
@@ -887,6 +913,22 @@ def parse_args(argv=None):
         default=int(os.environ.get("MUSE_REDIRECT_PORT", DEFAULT_REDIRECT_PORT)),
         help="plain-HTTP port that redirects to HTTPS; 0 disables",
     )
+    parser.add_argument(
+        "--led-host",
+        default=os.environ.get("MUSE_LED_HOST"),
+        help="WLED controller address; unset disables the strip entirely",
+    )
+    parser.add_argument(
+        "--led-count",
+        type=int,
+        default=int(os.environ.get("MUSE_LED_COUNT", DEFAULT_LED_COUNT)),
+        help="pixels on the strip",
+    )
+    parser.add_argument(
+        "--led-seat",
+        default=os.environ.get("MUSE_LED_SEAT", "p1"),
+        help="which seat's score drives the strip",
+    )
     return parser.parse_args(argv)
 
 
@@ -922,7 +964,27 @@ def main(argv=None):
         ", ".join(hub.seat_ids),
     )
 
-    app = create_app(static_dir=args.static_dir, hub=hub)
+    light = None
+    if args.led_host:
+        if args.led_seat not in hub.seat_ids:
+            raise SystemExit(
+                f"--led-seat {args.led_seat} is not one of {', '.join(hub.seat_ids)}"
+            )
+        # A count of zero produces no datagrams at all, so the strip would sit
+        # on WLED's own effect while the log claimed it was being driven -
+        # the silent failure this whole feature is written to avoid.
+        if args.led_count < 1:
+            raise SystemExit(f"--led-count must be at least 1, got {args.led_count}")
+        strip = WledStrip(args.led_host, count=args.led_count)
+        light = FocusLight(strip, seat=args.led_seat)
+        logger.info(
+            "Driving %s pixels at %s from seat %s (blue = relaxed, red = concentrated)",
+            args.led_count,
+            args.led_host,
+            args.led_seat,
+        )
+
+    app = create_app(static_dir=args.static_dir, hub=hub, light=light)
 
     # Only meaningful when actually serving TLS; without a certificate there is
     # nothing to redirect anyone to.
