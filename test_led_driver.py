@@ -112,11 +112,15 @@ def test_solid_builds_a_uniform_pixel_list():
 
 
 def test_per_pixel_run_splits_across_datagrams():
-    pixels = [(1, 2, 3)] * (DNRGB_MAX_PIXELS + 10)
+    # A uniform list cannot catch a slicing bug: every packet carrying the head
+    # of the list would look identical. Distinct colours pin which pixels land
+    # in which packet.
+    pixels = [(i % 256, 0, 0) for i in range(DNRGB_MAX_PIXELS + 10)]
     packets = build_dnrgb_packets(pixels, timeout_s=2)
     assert len(packets) == 2
-    assert len(packets[0][4:]) == DNRGB_MAX_PIXELS * 3
-    assert (packets[1][2] << 8) | packets[1][3] == DNRGB_MAX_PIXELS
+    assert packets[0][4:7] == bytes([0, 0, 0])
+    assert packets[0][-3:] == bytes([(DNRGB_MAX_PIXELS - 1) % 256, 0, 0])
+    assert packets[1][4:7] == bytes([DNRGB_MAX_PIXELS % 256, 0, 0])
 
 
 def test_show_pixels_sends_the_given_colours():
@@ -282,7 +286,7 @@ def test_disconnected_seat_releases_the_strip():
     # timeout take the strip back to an ambient effect, which is a readable
     # signal that nobody is driving it.
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=1)
     light.update(_snapshot(connected=False))
     assert strip.shown == []
     assert strip.released == 1
@@ -290,7 +294,7 @@ def test_disconnected_seat_releases_the_strip():
 
 def test_stale_seat_releases_the_strip():
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=1)
     light.update(_snapshot(stale=True))
     assert strip.shown == []
     assert strip.released == 1
@@ -298,7 +302,7 @@ def test_stale_seat_releases_the_strip():
 
 def test_calibrating_seat_releases_the_strip():
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=1)
     light.update(_snapshot(calibrating=True))
     assert strip.shown == []
     assert strip.released == 1
@@ -306,7 +310,7 @@ def test_calibrating_seat_releases_the_strip():
 
 def test_non_numeric_score_releases_the_strip():
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=1)
     light.update(_snapshot(normalized=None))
     assert strip.shown == []
     assert strip.released == 1
@@ -314,7 +318,7 @@ def test_non_numeric_score_releases_the_strip():
 
 def test_missing_seat_releases_the_strip():
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p3", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p3", tau_s=1.5, clock_fn=clk, count=1)
     light.update(_snapshot())
     assert strip.shown == []
     assert strip.released == 1

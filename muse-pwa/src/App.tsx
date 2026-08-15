@@ -118,6 +118,13 @@ function App() {
   const bandPowersRef = useRef<BandPowers>({
     delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0
   });
+  // False until the DSP interval has produced a real reading. A phone whose
+  // EEG buffer has not yet filled (or never fills) would otherwise stream
+  // this all-zero placeholder forever, and zero reads as an exactly neutral
+  // score — indistinguishable from a real reading at the calibrated
+  // baseline. Sending null while this is false lets the Pi tell "no data
+  // yet" apart from "calm at baseline" instead of fabricating the latter.
+  const bandsValidRef = useRef(false);
 
   // Raw capture. Queues accumulate between sends; a ref rather than state
   // because the streaming effect rebuilds often and must not lose samples.
@@ -554,6 +561,7 @@ function App() {
 
       setBandPowersState(avgPowers);
       bandPowersRef.current = avgPowers;
+      bandsValidRef.current = true;
 
       // Focus Score = Log10(Beta) - Log10(Theta)
       // High beta/theta ratio = high attention, alertness, or focus.
@@ -587,7 +595,10 @@ function App() {
           normalizedScore: drive,
           calibrationPhase: phase,
           isCalibrating: phase === 'relax' || phase === 'focus',
-          bands: bandPowersRef.current
+          // null until the DSP has produced a real reading — see bandsValidRef.
+          // All-zero bands would work out to exactly the calibrated baseline,
+          // reading as a real, perfectly neutral score rather than an absent one.
+          bands: bandsValidRef.current ? bandPowersRef.current : null
         }));
       }
     }, 1000 / 30);

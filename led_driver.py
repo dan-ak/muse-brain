@@ -1,9 +1,13 @@
-"""Stream pixels to a WLED controller.
+"""Stream pixels to a WLED controller, and drive them from one seat.
 
-Transport only: framing a pixel list as WLED DNRGB datagrams and getting them
-onto the wire. Colour and layout decisions live in ``strip_render``. Nothing
-here can raise into the caller, because the caller is the loop that records the
-EEG.
+Transport — framing a pixel list as WLED DNRGB datagrams and getting them onto
+the wire — plus ``FocusLight``, the single-seat driver that predates the game
+modes. Colour and layout live in ``strip_render``; when ``solo`` becomes a mode
+alongside the battle modes, ``FocusLight`` and ``Smoother`` move there too and
+this module is transport alone.
+
+Nothing here can raise into the caller, because the caller is the loop that
+records the EEG.
 """
 
 from __future__ import annotations
@@ -11,6 +15,8 @@ from __future__ import annotations
 import math
 import socket
 import time
+
+from strip_render import CONCENTRATED, RELAXED, focus_to_rgb, render_solo
 
 WLED_REALTIME_PORT = 21324
 
@@ -161,8 +167,8 @@ def _finite(value) -> bool:
 class FocusLight:
     """Turns hub snapshots into strip pixels for one watched seat."""
 
-    def __init__(self, strip, seat: str = "p1", tau_s: float = 1.5,
-                 clock_fn=None, count: int = 0):
+    def __init__(self, strip, count: int, seat: str = "p1", tau_s: float = 1.5,
+                 clock_fn=None):
         self._strip = strip
         self._seat = seat
         self._count = count
@@ -170,8 +176,6 @@ class FocusLight:
 
     def update(self, snapshot):
         """Drive one frame. Returns the pixels painted, or None if released."""
-        from strip_render import render_solo
-
         score = self._score(snapshot)
         if score is None:
             self._smoother.reset()
@@ -207,8 +211,6 @@ def _bring_up(argv=None):
     exact opposite of the wearer's state with nothing logging an error.
     """
     import argparse
-
-    from strip_render import CONCENTRATED, RELAXED, focus_to_rgb
 
     parser = argparse.ArgumentParser(description="Smoke-test a WLED strip.")
     parser.add_argument("host", help="WLED controller address")

@@ -568,7 +568,9 @@ class PlayerHub:
         return (self._clock() - last) > STALE_AFTER_S
 
     def snapshot(self):
-        """Whole state, as broadcast to observers and returned by /healthz.
+        """Whole state, as returned by /healthz and the base of what is broadcast
+        to observers (the broadcast loop adds a ``lights`` key on its own copy
+        when a light is configured).
 
         Deliberately not a delta. The payload is small, so a dashboard that
         connects late or reconnects after a laptop sleeps is immediately
@@ -788,18 +790,17 @@ async def _broadcast_loop(app):
         if light is not None:
             try:
                 pixels = light.update(snapshot)
+                # Flat ints rather than base64: ~1.7 KB at 144 pixels is
+                # nothing on a LAN, and it stays readable in devtools.
+                snapshot["lights"] = {
+                    "pixels": [c for pixel in (pixels or ()) for c in pixel]
+                }
             except Exception:
                 # The invariant is worth more than the diagnosis: an unforeseen
                 # failure in the lights must not end the task that flushes the
                 # recording and feeds the dashboard. Debug level because this
                 # would otherwise log ten times a second.
                 logger.debug("Light update failed", exc_info=True)
-            else:
-                # Flat ints rather than base64: ~1.7 KB at 144 pixels is
-                # nothing on a LAN, and it stays readable in devtools.
-                snapshot["lights"] = {
-                    "pixels": [c for pixel in (pixels or ()) for c in pixel]
-                }
 
         if not observers:
             continue

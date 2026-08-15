@@ -1218,6 +1218,19 @@ class _NullSocket:
         pass
 
 
+class RaisingLight:
+    """A light whose update always raises.
+
+    Stands in for the unforeseen failure the broadcast loop's try/except
+    exists to survive: FocusLight's return value is duck-typed, and a future
+    replacement (e.g. computed battle-mode rendering) could raise for reasons
+    this codebase cannot anticipate today.
+    """
+
+    def update(self, snapshot):
+        raise TypeError("boom")
+
+
 class TestLightOutput:
     @async_test
     async def test_light_is_driven_by_the_broadcast_loop(self, static_dir):
@@ -1256,6 +1269,28 @@ class TestLightOutput:
             await _settle(0.15)
             assert (await client.get("/healthz")).status == 200
 
+    @async_test
+    async def test_a_raising_light_does_not_break_the_broadcast_loop(self, static_dir):
+        # The try/except around light.update exists for exactly this: an
+        # unforeseen failure in the lights must not end the task that flushes
+        # the recording and feeds the dashboard. Assert the invariant directly
+        # — observers keep getting state payloads across repeated raises —
+        # rather than merely that nothing crashes.
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        light = RaisingLight()
+        app = create_app(static_dir=static_dir, hub=hub, light=light)
+        async with TestClient(TestServer(app)) as client:
+            async with client.ws_connect("/ws/observe") as observer:
+                await observer.receive()  # the immediate snapshot
+
+                seen = 0
+                for _ in range(5):
+                    payload = json.loads((await observer.receive()).data)
+                    assert payload["type"] == "state"
+                    assert "lights" not in payload
+                    seen += 1
+                assert seen == 5, "observer stopped receiving broadcasts after the raise"
+
 
 class TestStripInSnapshot:
     @async_test
@@ -1279,10 +1314,16 @@ class TestStripInSnapshot:
 
     @async_test
     async def test_no_light_means_no_lights_key(self, static_dir):
+        # /healthz returns hub.snapshot() directly, which never carries a
+        # "lights" key regardless of light configuration — that key is only
+        # ever added to the broadcast loop's own copy. So this has to watch an
+        # observer's broadcast payload, not /healthz, to prove anything.
         hub = PlayerHub(seat_ids=make_seat_ids(2))
         async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
-            body = await (await client.get("/healthz")).json()
-            assert "lights" not in body
+            async with client.ws_connect("/ws/observe") as observer:
+                await observer.receive()  # the immediate snapshot
+                payload = json.loads((await observer.receive()).data)
+                assert "lights" not in payload
 
 
 class TestLightArgs:

@@ -136,7 +136,9 @@ disagree.
 |---|---|
 | `server.py` | the Pi: serves the app, collects telemetry, writes recordings |
 | `session_recorder.py` | CSV recording, shared by both capture paths |
-| `led_driver.py` | drives an LED strip from a seat's focus score |
+| `metrics.py` | named EEG metrics and the calibration that makes them comparable |
+| `strip_render.py` | turns state into pixels — colour and layout for the LED strip |
+| `led_driver.py` | streams pixels to a WLED controller over UDP realtime |
 | `muse-pwa/` | the phone app (React + TypeScript) |
 | `analysis/` | loading and summarising recorded sessions |
 | `data/latest/` | the most recent published session |
