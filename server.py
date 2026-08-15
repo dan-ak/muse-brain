@@ -27,7 +27,7 @@ from pathlib import Path
 from aiohttp import WSCloseCode, WSMsgType, web
 
 from led_driver import FocusLight, WledStrip
-from metrics import BAND_NAMES
+from metrics import BAND_NAMES, is_finite_number as _is_finite_number
 from session_recorder import SessionRecorder
 
 logger = logging.getLogger("muse.server")
@@ -109,18 +109,6 @@ CUE = "cue"
 CUE_PHASES = {"instruct", "trial", "rest", "done"}
 
 RAW = "raw"
-
-
-def _is_finite_number(value):
-    """True for a real, finite number — and notably False for bool and None.
-
-    JSON.stringify turns NaN and Infinity into null, and powerByBand can produce
-    either, so without this check nulls and strings were written straight into
-    numeric CSV columns while meta.json still reported zero errors.
-    """
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    return value == value and value not in (float("inf"), float("-inf"))
 
 
 def _clean_bands(bands):

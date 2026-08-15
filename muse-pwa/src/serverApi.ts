@@ -1,13 +1,12 @@
 // The page and the sockets share an origin, so nothing here is configured by
 // hand: whatever served this build also terminates the websockets.
 
-export type BandPowers = {
-  delta: number;
-  theta: number;
-  alpha: number;
-  beta: number;
-  gamma: number;
-};
+// The same five numbers the DSP produces, re-exported rather than restated:
+// this is literally what the phone puts on the wire, so a second declaration
+// could drift from the one the FFT actually fills in.
+import type { BandPowers } from './utils/dsp';
+
+export type { BandPowers };
 
 export type SeatState = {
   id: string;

@@ -645,6 +645,11 @@ function App() {
       clearInterval(mockDataGeneratorInterval);
       clearInterval(drainInterval);
       clearInterval(rawSendInterval);
+      // The DSP is gone, so the bands it produced are history. Left true, a
+      // reconnect would stream the *previous* session's band powers as if
+      // fresh for the two seconds the FFT window takes to refill — the exact
+      // "no data yet" case this flag exists to make visible.
+      bandsValidRef.current = false;
     };
     // Deliberately excludes focusScore, baseline, halfRange, calState and
     // playerId: they are read through refs so a changing reading cannot tear

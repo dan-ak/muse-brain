@@ -19,6 +19,20 @@ BAND_NAMES = ("delta", "theta", "alpha", "beta", "gamma")
 _EPS = 1e-6
 
 
+def is_finite_number(value) -> bool:
+    """True for a real, finite number — and notably False for bool and None.
+
+    Lives here, in the module both the server and the light driver already
+    depend on, because both have to answer the same question about the same
+    numbers: JSON.stringify turns NaN and Infinity into null, and powerByBand
+    can produce either, so without this check nulls and strings flow straight
+    into numeric CSV columns and into the colour ramp.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and value not in (float("inf"), float("-inf"))
+
+
 def _log(value) -> float:
     """log10 with a floor, so a dead channel reading 0 does not give -inf."""
     return math.log10(max(0.0, float(value)) + _EPS)
@@ -83,5 +97,13 @@ def calibrate_all(relax_bands, focus_bands) -> dict[str, tuple[float, float]]:
 def drive(bands, metric_id: str, calibration=None) -> float:
     """A metric as a signed drive in [-1, +1]."""
     baseline, half_range = calibration or NEUTRAL_CALIBRATION
+    # ``calibration_from`` never returns a half-range this small, but a
+    # calibration that arrives from anywhere else can: a stored one from an
+    # older format, or a client that sends its own. A zero would divide by
+    # zero and a negative would invert the whole scale, so apply the same
+    # floor here rather than trusting the caller. Note ``(0.0, 0.0)`` is a
+    # truthy tuple, so the ``or`` above does not catch it.
+    if half_range < MIN_HALF_RANGE:
+        half_range = FALLBACK_HALF_RANGE
     value = metric_value(bands, metric_id)
     return max(-1.0, min(1.0, (value - baseline) / half_range))

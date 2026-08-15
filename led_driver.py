@@ -16,6 +16,7 @@ import math
 import socket
 import time
 
+from metrics import is_finite_number
 from strip_render import CONCENTRATED, RELAXED, focus_to_rgb, render_solo
 
 WLED_REALTIME_PORT = 21324
@@ -133,9 +134,19 @@ class WledStrip:
         A failed datagram does not abandon the rest: on a strip long enough to
         need several, stopping early would leave its head on the new colour and
         its tail on the old one.
+
+        Framing is inside the guard too. ``bytes()`` rejects a channel that is
+        not a whole number in 0-255, and a renderer that hands over a float or
+        an out-of-range value must dim the strip, not raise into the loop that
+        writes the recording.
         """
+        try:
+            packets = build_dnrgb_packets(pixels, self._timeout_s)
+        except (TypeError, ValueError):
+            return False
+
         sent = True
-        for packet in build_dnrgb_packets(pixels, self._timeout_s):
+        for packet in packets:
             try:
                 self._sock.sendto(packet, self._addr)
             except OSError:
@@ -155,13 +166,6 @@ class WledStrip:
 
     def close(self) -> None:
         self._sock.close()
-
-
-def _finite(value) -> bool:
-    """True for a real, finite number - and notably False for bool and None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return False
-    return value == value and value not in (float("inf"), float("-inf"))
 
 
 class FocusLight:
@@ -198,7 +202,7 @@ class FocusLight:
             if not seat.get("connected") or seat.get("stale") or seat.get("calibrating"):
                 return None
             value = seat.get("normalized")
-            return float(value) if _finite(value) else None
+            return float(value) if is_finite_number(value) else None
         return None
 
 
@@ -218,6 +222,12 @@ def _bring_up(argv=None):
     parser.add_argument("--check", action="store_true",
                         help="hold blue then red so you can verify colour order")
     args = parser.parse_args(argv)
+
+    # Same guard the server applies to --led-count: a count below 1 produces no
+    # datagrams at all, so every send "succeeds" against a strip that never
+    # lights. That is exactly the silent failure this tool exists to catch.
+    if args.count < 1:
+        parser.error(f"--count must be at least 1, got {args.count}")
 
     strip = WledStrip(args.host, count=args.count)
     try:
