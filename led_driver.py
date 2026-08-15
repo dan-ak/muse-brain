@@ -159,25 +159,27 @@ def _finite(value) -> bool:
 
 
 class FocusLight:
-    """Turns hub snapshots into strip colours for one watched seat."""
+    """Turns hub snapshots into strip pixels for one watched seat."""
 
-    def __init__(self, strip, seat: str = "p1", tau_s: float = 1.5, clock_fn=None):
+    def __init__(self, strip, seat: str = "p1", tau_s: float = 1.5,
+                 clock_fn=None, count: int = 0):
         self._strip = strip
         self._seat = seat
+        self._count = count
         self._smoother = Smoother(tau_s, clock_fn)
 
-    def update(self, snapshot) -> tuple[int, int, int] | None:
-        """Drive one frame. Returns the colour shown, or None if released."""
-        from strip_render import focus_to_rgb
+    def update(self, snapshot):
+        """Drive one frame. Returns the pixels painted, or None if released."""
+        from strip_render import render_solo
 
         score = self._score(snapshot)
         if score is None:
             self._smoother.reset()
             self._strip.release()
             return None
-        rgb = focus_to_rgb(self._smoother.update(score))
-        self._strip.show(rgb)
-        return rgb
+        pixels = render_solo(self._smoother.update(score), self._count)
+        self._strip.show_pixels(pixels)
+        return pixels
 
     def _score(self, snapshot) -> float | None:
         """The watched seat's score, or None if it should not be trusted.

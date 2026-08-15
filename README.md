@@ -125,6 +125,11 @@ phone whose headset died keeps sending its last score forever, so an unchanging
 reading is treated as a dead source and the seat goes stale. The lights are
 reporting that faithfully; look at the headset, not the strip.
 
+The dashboard shows a simulated strip along the bottom. The Pi renders the
+pixels and sends that same array to both WLED and the dashboard, so what you
+see there is what the strip is doing — there is no second renderer that could
+disagree.
+
 ## Repository layout
 
 | Path | |
@@ -148,7 +153,7 @@ worth knowing before comparing numbers across them.
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest    # 207 tests
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest    # 239 tests
 
 cd muse-pwa && npm ci && npm run build
 ```

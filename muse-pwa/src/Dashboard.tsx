@@ -104,6 +104,30 @@ function SeatCard({ seat }: { seat: SeatState }) {
   );
 }
 
+/** Shows exactly the pixels the Pi is sending to WLED — the Pi renders, this
+ *  only displays, so the simulation cannot drift from the real strip. */
+function SimulatedStrip({ pixels }: { pixels: number[] }) {
+  const count = Math.floor(pixels.length / 3);
+  if (count === 0) return null;
+
+  return (
+    <section className="sim-strip-card glass-card">
+      <h2 className="sim-strip-title">Strip</h2>
+      <div className="sim-strip">
+        {Array.from({ length: count }, (_, i) => (
+          <span
+            key={i}
+            className="sim-px"
+            style={{
+              background: `rgb(${pixels[i * 3]}, ${pixels[i * 3 + 1]}, ${pixels[i * 3 + 2]})`,
+            }}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
 export default function Dashboard() {
   const [state, setState] = useState<HubState>(EMPTY);
   const [linkUp, setLinkUp] = useState(false);
@@ -234,6 +258,8 @@ export default function Dashboard() {
       {state.seats.length === 0 && (
         <p className="dash-waiting">Waiting for the server…</p>
       )}
+
+      <SimulatedStrip pixels={state.lights?.pixels ?? []} />
     </div>
   );
 }

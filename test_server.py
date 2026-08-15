@@ -9,6 +9,7 @@ import subprocess
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from led_driver import FocusLight, WledStrip
 from server import (
     CALIBRATED,
     IGNORED,
@@ -1207,6 +1208,16 @@ class FakeLight:
         self.snapshots.append(snapshot)
 
 
+class _NullSocket:
+    """Swallows datagrams so a test never touches the network."""
+
+    def sendto(self, payload, addr):
+        pass
+
+    def close(self):
+        pass
+
+
 class TestLightOutput:
     @async_test
     async def test_light_is_driven_by_the_broadcast_loop(self, static_dir):
@@ -1244,6 +1255,34 @@ class TestLightOutput:
         async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
             await _settle(0.15)
             assert (await client.get("/healthz")).status == 200
+
+
+class TestStripInSnapshot:
+    @async_test
+    async def test_pixels_are_broadcast_to_observers(self, static_dir):
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        strip = WledStrip("127.0.0.1", count=3, sock=_NullSocket())
+        light = FocusLight(strip, seat="p1", count=3)
+        app = create_app(static_dir=static_dir, hub=hub, light=light)
+
+        async with TestClient(TestServer(app)) as client:
+            async with client.ws_connect("/ws/observe") as observer:
+                await observer.receive()
+                async with client.ws_connect("/ws/p1") as player:
+                    await player.send_json({"normalizedScore": 1.0})
+                    for _ in range(20):
+                        payload = json.loads((await observer.receive()).data)
+                        if payload.get("lights", {}).get("pixels"):
+                            assert payload["lights"]["pixels"] == [255, 0, 0] * 3
+                            return
+                    pytest.fail("observer never saw strip pixels")
+
+    @async_test
+    async def test_no_light_means_no_lights_key(self, static_dir):
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            body = await (await client.get("/healthz")).json()
+            assert "lights" not in body
 
 
 class TestLightArgs:

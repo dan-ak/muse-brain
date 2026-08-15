@@ -787,13 +787,19 @@ async def _broadcast_loop(app):
         # missing controller cannot interrupt this loop.
         if light is not None:
             try:
-                light.update(snapshot)
+                pixels = light.update(snapshot)
             except Exception:
                 # The invariant is worth more than the diagnosis: an unforeseen
                 # failure in the lights must not end the task that flushes the
                 # recording and feeds the dashboard. Debug level because this
                 # would otherwise log ten times a second.
                 logger.debug("Light update failed", exc_info=True)
+            else:
+                # Flat ints rather than base64: ~1.7 KB at 144 pixels is
+                # nothing on a LAN, and it stays readable in devtools.
+                snapshot["lights"] = {
+                    "pixels": [c for pixel in (pixels or ()) for c in pixel]
+                }
 
         if not observers:
             continue
@@ -996,7 +1002,7 @@ def main(argv=None):
         if args.led_count < 1:
             raise SystemExit(f"--led-count must be at least 1, got {args.led_count}")
         strip = WledStrip(args.led_host, count=args.led_count)
-        light = FocusLight(strip, seat=args.led_seat)
+        light = FocusLight(strip, seat=args.led_seat, count=args.led_count)
         logger.info(
             "Driving %s pixels at %s from seat %s (blue = relaxed, red = concentrated)",
             args.led_count,

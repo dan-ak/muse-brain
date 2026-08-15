@@ -211,3 +211,30 @@
   color: var(--text-secondary);
   padding: 40px;
 }
+
+.sim-strip-card {
+  margin-top: 1rem;
+  padding: 0.75rem 1rem 1rem;
+}
+
+.sim-strip-title {
+  margin: 0 0 0.5rem;
+  font-size: 0.75rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.sim-strip {
+  display: flex;
+  gap: 1px;
+  height: 28px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #000;
+}
+
+.sim-px {
+  flex: 1 1 0;
+  min-width: 0;
+}

@@ -232,6 +232,7 @@ def _snapshot(**overrides):
         "calibrating": False,
         "connected": True,
         "stale": False,
+        "bands": None,
     }
     seat.update(overrides)
     return {"seats": [seat], "recording": {"active": False, "label": None}}
@@ -242,25 +243,38 @@ class FakeStrip:
         self.shown = []
         self.released = 0
 
-    def show(self, rgb):
-        self.shown.append(rgb)
+    def show_pixels(self, pixels):
+        self.shown.append(list(pixels))
 
     def release(self):
         self.released += 1
 
 
+def test_focus_light_returns_the_pixels_it_painted():
+    strip, clk = FakeStrip(), FakeClock(0.0)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=3)
+    pixels = light.update(_snapshot(normalized=1.0))
+    assert pixels == [(255, 0, 0)] * 3
+
+
+def test_focus_light_returns_none_when_released():
+    strip, clk = FakeStrip(), FakeClock(0.0)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=3)
+    assert light.update(_snapshot(connected=False)) is None
+
+
 def test_drives_the_strip_from_the_watched_seat():
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=1)
     light.update(_snapshot(normalized=1.0))
-    assert strip.shown == [(255, 0, 0)]
+    assert strip.shown == [[(255, 0, 0)]]
 
 
 def test_a_relaxed_wearer_turns_the_strip_blue():
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=1)
     light.update(_snapshot(normalized=-1.0))
-    assert strip.shown == [(0, 0, 255)]
+    assert strip.shown == [[(0, 0, 255)]]
 
 
 def test_disconnected_seat_releases_the_strip():
@@ -308,32 +322,32 @@ def test_missing_seat_releases_the_strip():
 
 def test_other_seats_do_not_drive_the_strip():
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=1)
     snap = _snapshot(normalized=1.0)
     snap["seats"].append({
         "id": "p2", "raw": 0.0, "normalized": 0.0, "calibrating": False,
-        "connected": True, "stale": False,
+        "connected": True, "stale": False, "bands": None,
     })
     light.update(snap)
-    assert strip.shown == [(255, 0, 0)]
+    assert strip.shown == [[(255, 0, 0)]]
 
 
 def test_reconnecting_does_not_fade_from_the_pre_dropout_colour():
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=1)
     light.update(_snapshot(normalized=1.0))       # red
     clk.t = 1.0
     light.update(_snapshot(connected=False))      # dropout
     clk.t = 2.0
     light.update(_snapshot(normalized=-1.0))      # back, and relaxed
-    assert strip.shown[-1] == (0, 0, 255)
+    assert strip.shown[-1] == [(0, 0, 255)]
 
 
 def test_smoothing_applies_across_successive_updates():
     strip, clk = FakeStrip(), FakeClock(0.0)
-    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk)
+    light = FocusLight(strip, seat="p1", tau_s=1.5, clock_fn=clk, count=1)
     light.update(_snapshot(normalized=-1.0))
     clk.t = 0.1
     light.update(_snapshot(normalized=1.0))
-    assert strip.shown[0] == (0, 0, 255)
-    assert strip.shown[1] != (255, 0, 0)   # eased, not snapped
+    assert strip.shown[0] == [(0, 0, 255)]
+    assert strip.shown[1] != [(255, 0, 0)]   # eased, not snapped

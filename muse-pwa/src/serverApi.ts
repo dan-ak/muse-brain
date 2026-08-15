@@ -30,10 +30,15 @@ export type RecordingState = {
   label: string;
 };
 
+export type LightsState = {
+  pixels: number[];
+};
+
 export type HubState = {
   type: 'state';
   seats: SeatState[];
   recording: RecordingState;
+  lights?: LightsState;
 };
 
 const wsScheme = () => (window.location.protocol === 'https:' ? 'wss' : 'ws');
