@@ -94,15 +94,23 @@ class Smoother:
         self._last_t = None
 
 
-def build_dnrgb_packets(rgb, count: int, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[bytes]:
-    """One solid colour across ``count`` pixels, as WLED DNRGB datagrams."""
-    pixel = bytes(rgb)
+def solid(rgb, count: int) -> list[tuple[int, int, int]]:
+    """One colour repeated — the whole-strip case of a pixel list."""
+    return [tuple(rgb)] * count
+
+
+def build_dnrgb_packets(pixels, timeout_s: int = DEFAULT_TIMEOUT_S) -> list[bytes]:
+    """A pixel list as WLED DNRGB datagrams, split at the per-packet limit."""
     packets = []
     start = 0
-    while start < count:
-        run = min(DNRGB_MAX_PIXELS, count - start)
+    total = len(pixels)
+    while start < total:
+        run = min(DNRGB_MAX_PIXELS, total - start)
         header = bytes([DNRGB_PROTOCOL, timeout_s, (start >> 8) & 0xFF, start & 0xFF])
-        packets.append(header + pixel * run)
+        body = bytearray()
+        for r, g, b in pixels[start:start + run]:
+            body += bytes((r, g, b))
+        packets.append(header + bytes(body))
         start += run
     return packets
 
@@ -140,20 +148,24 @@ class WledStrip:
             sock.setblocking(False)
         self._sock = sock
 
-    def show(self, rgb) -> bool:
-        """Paint the whole strip. True if every datagram went out.
+    def show_pixels(self, pixels) -> bool:
+        """Paint an explicit pixel list. True if every datagram went out.
 
         A failed datagram does not abandon the rest: on a strip long enough to
         need several, stopping early would leave its head on the new colour and
         its tail on the old one.
         """
         sent = True
-        for packet in build_dnrgb_packets(rgb, self._count, self._timeout_s):
+        for packet in build_dnrgb_packets(pixels, self._timeout_s):
             try:
                 self._sock.sendto(packet, self._addr)
             except OSError:
                 sent = False
         return sent
+
+    def show(self, rgb) -> bool:
+        """Paint the whole strip one colour."""
+        return self.show_pixels(solid(rgb, self._count))
 
     def release(self) -> None:
         """Stop driving and let WLED's realtime timeout reclaim the strip.

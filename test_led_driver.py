@@ -8,6 +8,7 @@ from led_driver import (
     WledStrip,
     build_dnrgb_packets,
     focus_to_rgb,
+    solid,
 )
 
 
@@ -122,34 +123,68 @@ def test_smoother_resets_so_a_reconnect_does_not_fade_from_stale_state():
 
 
 def test_packet_carries_protocol_and_timeout_header():
-    packets = build_dnrgb_packets((255, 0, 0), count=1, timeout_s=2)
+    packets = build_dnrgb_packets(solid((255, 0, 0), 1), timeout_s=2)
     assert len(packets) == 1
     assert packets[0][:4] == bytes([4, 2, 0, 0])   # 4 = DNRGB, 3 would be DRGBW
 
 
 def test_packet_repeats_the_colour_for_every_pixel():
-    packets = build_dnrgb_packets((10, 20, 30), count=3, timeout_s=2)
+    packets = build_dnrgb_packets(solid((10, 20, 30), 3), timeout_s=2)
     assert packets[0][4:] == bytes([10, 20, 30] * 3)
 
 
 def test_long_strips_are_split_across_packets():
-    count = DNRGB_MAX_PIXELS + 10
-    packets = build_dnrgb_packets((1, 2, 3), count=count, timeout_s=2)
+    packets = build_dnrgb_packets(solid((1, 2, 3), DNRGB_MAX_PIXELS + 10), timeout_s=2)
     assert len(packets) == 2
     assert len(packets[0][4:]) == DNRGB_MAX_PIXELS * 3
     assert len(packets[1][4:]) == 10 * 3
 
 
 def test_continuation_packet_carries_its_start_index():
-    packets = build_dnrgb_packets((1, 2, 3), count=DNRGB_MAX_PIXELS + 1, timeout_s=2)
+    packets = build_dnrgb_packets(solid((1, 2, 3), DNRGB_MAX_PIXELS + 1), timeout_s=2)
     start = (packets[1][2] << 8) | packets[1][3]
     assert start == DNRGB_MAX_PIXELS
 
 
 def test_packet_fits_in_a_single_datagram():
-    packets = build_dnrgb_packets((1, 2, 3), count=1000, timeout_s=2)
+    packets = build_dnrgb_packets(solid((1, 2, 3), 1000), timeout_s=2)
     for packet in packets:
         assert len(packet) <= 1472
+
+
+def test_packets_carry_per_pixel_colours():
+    pixels = [(1, 2, 3), (4, 5, 6), (7, 8, 9)]
+    packets = build_dnrgb_packets(pixels, timeout_s=2)
+    assert len(packets) == 1
+    assert packets[0][:4] == bytes([4, 2, 0, 0])
+    assert packets[0][4:] == bytes([1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+
+def test_solid_builds_a_uniform_pixel_list():
+    assert solid((9, 8, 7), 3) == [(9, 8, 7), (9, 8, 7), (9, 8, 7)]
+
+
+def test_per_pixel_run_splits_across_datagrams():
+    pixels = [(1, 2, 3)] * (DNRGB_MAX_PIXELS + 10)
+    packets = build_dnrgb_packets(pixels, timeout_s=2)
+    assert len(packets) == 2
+    assert len(packets[0][4:]) == DNRGB_MAX_PIXELS * 3
+    assert (packets[1][2] << 8) | packets[1][3] == DNRGB_MAX_PIXELS
+
+
+def test_show_pixels_sends_the_given_colours():
+    sock = FakeSocket()
+    strip = WledStrip("10.0.0.5", count=3, sock=sock)
+    strip.show_pixels([(1, 2, 3), (4, 5, 6), (7, 8, 9)])
+    payload, _ = sock.sent[0]
+    assert payload[4:] == bytes([1, 2, 3, 4, 5, 6, 7, 8, 9])
+
+
+def test_empty_pixel_list_sends_nothing():
+    sock = FakeSocket()
+    strip = WledStrip("10.0.0.5", count=0, sock=sock)
+    assert strip.show_pixels([]) is True
+    assert sock.sent == []
 
 
 # --- the UDP sender ----------------------------------------------------------
