@@ -39,15 +39,19 @@ RELAXED = (0, 0, 255)
 CONCENTRATED = (255, 0, 0)
 
 
-def focus_to_rgb(normalized: float) -> tuple[int, int, int]:
-    """0.0 -> blue (relaxed), 1.0 -> red (concentrated).
+def focus_to_rgb(drive: float) -> tuple[int, int, int]:
+    """-1.0 -> blue (relaxed), 0.0 -> magenta (baseline), +1.0 -> red.
+
+    The drive arriving from the phone is signed: it is
+    ``(score - baseline) / halfRange`` clamped to [-1, +1], so zero means "at
+    your own calibrated baseline", not "relaxed". Clamping it to [0, 1] threw
+    away the entire relaxed half of the range.
 
     Walks the hue circle from 240 to 360 degrees at full saturation and value,
     which on that arc is exactly two linear segments: blue to magenta, then
-    magenta to red. Written out rather than routed through ``colorsys`` so the
-    endpoints and the midpoint land on exact bytes.
+    magenta to red.
     """
-    t = min(1.0, max(0.0, float(normalized)))
+    t = (min(1.0, max(-1.0, float(drive))) + 1.0) / 2.0
     if t <= 0.5:
         return (round(255 * t * 2), 0, 255)
     return (255, 0, round(255 * (1 - (t - 0.5) * 2)))

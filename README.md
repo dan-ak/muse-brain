@@ -79,8 +79,9 @@ not something a setting fixes.
 ## Lights
 
 An LED strip can show one wearer's state to the room: **blue when relaxed, red
-when concentrated**, everything between on a fully-saturated hue ramp through
-magenta.
+when concentrated**, with magenta at their calibrated baseline. The score is a
+signed drive in `[-1, +1]`, so the middle of the ramp is a real reading rather
+than an absence of one.
 
 The strip is driven by a [WLED](https://kno.wled.ge) controller — a GLEDOPTO
 Elite ESP32 (`GL-C-615WL`, or `GL-C-616WL` for the Ethernet version) ships with
