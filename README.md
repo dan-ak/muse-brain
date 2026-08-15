@@ -155,7 +155,7 @@ worth knowing before comparing numbers across them.
 
 ```bash
 python -m venv .venv && .venv/bin/pip install -r requirements.txt
-QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest    # 239 tests
+QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest    # 240 tests
 
 cd muse-pwa && npm ci && npm run build
 ```
