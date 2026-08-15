@@ -1,6 +1,14 @@
 // The page and the sockets share an origin, so nothing here is configured by
 // hand: whatever served this build also terminates the websockets.
 
+export type BandPowers = {
+  delta: number;
+  theta: number;
+  alpha: number;
+  beta: number;
+  gamma: number;
+};
+
 export type SeatState = {
   id: string;
   connected: boolean;
@@ -13,6 +21,8 @@ export type SeatState = {
   raw: number;
   normalized: number;
   calibrating: boolean;
+  /** Channel-averaged band powers, or null when the seat is not sending usable ones. */
+  bands: BandPowers | null;
 };
 
 export type RecordingState = {

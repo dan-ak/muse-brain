@@ -27,6 +27,7 @@ from pathlib import Path
 from aiohttp import WSCloseCode, WSMsgType, web
 
 from led_driver import FocusLight, WledStrip
+from metrics import BAND_NAMES
 from session_recorder import SessionRecorder
 
 logger = logging.getLogger("muse.server")
@@ -122,6 +123,24 @@ def _is_finite_number(value):
     return value == value and value not in (float("inf"), float("-inf"))
 
 
+def _clean_bands(bands):
+    """The five band powers as floats, or None if any is missing or unusable.
+
+    Rejected as a set rather than per band: a metric is a ratio of two of
+    these, so one bad value poisons any metric that touches it. Half a band
+    set is not better than none.
+    """
+    if not isinstance(bands, dict):
+        return None
+    cleaned = {}
+    for name in BAND_NAMES:
+        value = bands.get(name)
+        if not _is_finite_number(value):
+            return None
+        cleaned[name] = float(value)
+    return cleaned
+
+
 def make_seat_ids(count):
     if count < 1:
         raise ValueError("need at least one seat")
@@ -129,7 +148,7 @@ def make_seat_ids(count):
 
 
 def _blank_state():
-    return {"raw": 0.0, "normalized": 0.0, "calibrating": False}
+    return {"raw": 0.0, "normalized": 0.0, "calibrating": False, "bands": None}
 
 
 class PlayerHub:
@@ -224,6 +243,7 @@ class PlayerHub:
                 "raw": float(data.get("rawScore", 0.0)),
                 "normalized": float(data.get("normalizedScore", 0.0)),
                 "calibrating": bool(data.get("isCalibrating", False)),
+                "bands": _clean_bands(data.get("bands")),
             }
         except (TypeError, ValueError):
             return IGNORED

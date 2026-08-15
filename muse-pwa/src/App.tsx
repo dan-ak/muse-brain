@@ -115,6 +115,9 @@ function App() {
   const calibrationSamplesRef = useRef<number[]>([]);
   const relaxSamplesRef = useRef<number[]>([]);
   const focusSamplesRef = useRef<number[]>([]);
+  const bandPowersRef = useRef<BandPowers>({
+    delta: 0, theta: 0, alpha: 0, beta: 0, gamma: 0
+  });
 
   // Raw capture. Queues accumulate between sends; a ref rather than state
   // because the streaming effect rebuilds often and must not lose samples.
@@ -550,6 +553,7 @@ function App() {
       avgPowers.gamma /= CHANNELS;
 
       setBandPowersState(avgPowers);
+      bandPowersRef.current = avgPowers;
 
       // Focus Score = Log10(Beta) - Log10(Theta)
       // High beta/theta ratio = high attention, alertness, or focus.
@@ -582,7 +586,8 @@ function App() {
           rawScore: score,
           normalizedScore: drive,
           calibrationPhase: phase,
-          isCalibrating: phase === 'relax' || phase === 'focus'
+          isCalibrating: phase === 'relax' || phase === 'focus',
+          bands: bandPowersRef.current
         }));
       }
     }, 1000 / 30);

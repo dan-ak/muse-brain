@@ -109,7 +109,9 @@ class TestPlayerHub:
             json.dumps({"rawScore": 1.5, "normalizedScore": 0.25, "isCalibrating": True}),
         )
         assert outcome == TELEMETRY
-        assert hub.state_of("p1") == {"raw": 1.5, "normalized": 0.25, "calibrating": True}
+        assert hub.state_of("p1") == {
+            "raw": 1.5, "normalized": 0.25, "calibrating": True, "bands": None,
+        }
 
     def test_calibration_event_does_not_clobber_scores(self):
         hub = PlayerHub()
@@ -139,7 +141,9 @@ class TestPlayerHub:
     def test_malformed_frames_are_ignored(self, payload):
         hub = PlayerHub()
         assert hub.handle_message("p1", payload) == IGNORED
-        assert hub.state_of("p1") == {"raw": 0.0, "normalized": 0.0, "calibrating": False}
+        assert hub.state_of("p1") == {
+            "raw": 0.0, "normalized": 0.0, "calibrating": False, "bands": None,
+        }
 
     def test_attach_reports_the_socket_it_displaced(self):
         hub = PlayerHub()
@@ -301,7 +305,7 @@ class TestPlayerHub:
         seats = {s["id"]: s for s in hub.snapshot()["seats"]}
         assert seats["p1"] == {
             "id": "p1", "connected": True, "stale": True,
-            "raw": 0.0, "normalized": 0.5, "calibrating": False,
+            "raw": 0.0, "normalized": 0.5, "calibrating": False, "bands": None,
             # A single arrival gives no interval to measure, and a stale seat
             # is never also reported as throttled.
             "rate": 0.0, "throttled": False,
@@ -454,7 +458,9 @@ class TestRawCapture:
         hub.handle_message("p1", _raw_batch(eeg=[[1, 2, 3, 4]]))
         hub.stop_recording()
 
-        assert hub.state_of("p1") == {"raw": 2.0, "normalized": 0.5, "calibrating": False}
+        assert hub.state_of("p1") == {
+            "raw": 2.0, "normalized": 0.5, "calibrating": False, "bands": None,
+        }
 
     def test_recording_message_reflects_session_state(self, recorder):
         hub = PlayerHub(recorder=recorder)
@@ -704,7 +710,9 @@ class TestCueMarkers:
         hub.handle_message("p1", json.dumps({"rawScore": 2.0, "normalizedScore": 0.5}))
         hub.handle_message("p1", _cue(phase="trial", eyes="open", task="focus", trial=1))
         hub.stop_recording()
-        assert hub.state_of("p1") == {"raw": 2.0, "normalized": 0.5, "calibrating": False}
+        assert hub.state_of("p1") == {
+            "raw": 2.0, "normalized": 0.5, "calibrating": False, "bands": None,
+        }
 
     def test_cues_outside_a_session_are_harmless(self, recorder):
         hub = PlayerHub(recorder=recorder)
@@ -1253,3 +1261,63 @@ class TestLightArgs:
 
     def test_led_seat_defaults_to_the_first_seat(self):
         assert parse_args([]).led_seat == "p1"
+
+
+class TestLiveBands:
+    @async_test
+    async def test_bands_reach_the_snapshot(self, static_dir):
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            async with client.ws_connect("/ws/p1") as player:
+                await player.send_json({
+                    "normalizedScore": 0.5,
+                    "bands": {"delta": 1.0, "theta": 2.0, "alpha": 3.0,
+                              "beta": 4.0, "gamma": 5.0},
+                })
+                await _settle()
+
+            seat = next(s for s in hub.snapshot()["seats"] if s["id"] == "p1")
+            assert seat["bands"] == {"delta": 1.0, "theta": 2.0, "alpha": 3.0,
+                                     "beta": 4.0, "gamma": 5.0}
+
+    @async_test
+    async def test_missing_bands_are_none(self, static_dir):
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            async with client.ws_connect("/ws/p1") as player:
+                await player.send_json({"normalizedScore": 0.5})
+                await _settle()
+
+            seat = next(s for s in hub.snapshot()["seats"] if s["id"] == "p1")
+            assert seat["bands"] is None
+
+    @async_test
+    async def test_non_finite_bands_are_rejected_whole(self, static_dir):
+        # powerByBand can produce NaN or Infinity, and JSON.stringify turns both
+        # into null. One bad band makes the whole set untrustworthy.
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            async with client.ws_connect("/ws/p1") as player:
+                await player.send_json({
+                    "normalizedScore": 0.5,
+                    "bands": {"delta": 1.0, "theta": None, "alpha": 3.0,
+                              "beta": 4.0, "gamma": 5.0},
+                })
+                await _settle()
+
+            seat = next(s for s in hub.snapshot()["seats"] if s["id"] == "p1")
+            assert seat["bands"] is None
+
+    @async_test
+    async def test_partial_band_sets_are_rejected(self, static_dir):
+        hub = PlayerHub(seat_ids=make_seat_ids(2))
+        async with TestClient(TestServer(create_app(static_dir=static_dir, hub=hub))) as client:
+            async with client.ws_connect("/ws/p1") as player:
+                await player.send_json({
+                    "normalizedScore": 0.5,
+                    "bands": {"delta": 1.0, "theta": 2.0},
+                })
+                await _settle()
+
+            seat = next(s for s in hub.snapshot()["seats"] if s["id"] == "p1")
+            assert seat["bands"] is None
